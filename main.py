@@ -1,0 +1,207 @@
+import os
+import queue
+import threading
+import subprocess
+import tempfile
+import concurrent.futures
+import numpy as np
+import sounddevice as sd
+from dotenv import load_dotenv
+from transcriber import transcribe_chunk, transcribe_file
+from fact_checker import fact_check
+from display import show_results
+
+load_dotenv() or load_dotenv(".env.example")
+
+SAMPLE_RATE = 16000
+CHUNK_SECONDS = 5
+SILENCE_THRESHOLD = 0.01  # ponytail: raise if mic picks up too much background noise
+
+audio_queue: queue.Queue = queue.Queue()
+transcript_queue: queue.Queue[str] = queue.Queue()
+
+
+# ── shared fact-check worker ──────────────────────────────────────────────────
+
+def fact_check_loop():
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        futures: set = set()
+        while True:
+            try:
+                transcript = transcript_queue.get(timeout=0.1)
+                futures.add(pool.submit(fact_check, transcript))
+            except queue.Empty:
+                pass
+            done = {f for f in futures if f.done()}
+            for f in done:
+                try:
+                    results = f.result()
+                    if results:
+                        show_results(results)
+                except Exception as e:
+                    print(f"[error] {e}")
+            futures -= done
+
+
+# ── mode 1: microphone ────────────────────────────────────────────────────────
+
+def _mic_capture():
+    while True:
+        audio = sd.rec(SAMPLE_RATE * CHUNK_SECONDS, samplerate=SAMPLE_RATE, channels=1, dtype="float32")
+        sd.wait()
+        audio = audio.flatten()
+        if float(np.sqrt(np.mean(audio ** 2))) > SILENCE_THRESHOLD:
+            audio_queue.put(audio)
+
+def _transcription_worker():
+    while True:
+        audio = audio_queue.get()
+        result = transcribe_chunk(audio)
+        if result:
+            print(f"[transcript] {result}")
+            transcript_queue.put(result)
+
+def run_mic():
+    print("Listening via microphone. Ctrl+C to stop.\n")
+    threading.Thread(target=_mic_capture, daemon=True).start()
+    threading.Thread(target=_transcription_worker, daemon=True).start()
+    fact_check_loop()
+
+
+# ── mode 2: live stream URL ───────────────────────────────────────────────────
+
+def _resolve_stream(url: str) -> str | None:
+    r = subprocess.run(["yt-dlp", "-g", "-f", "bestaudio", url], capture_output=True, text=True)
+    line = r.stdout.strip().split("\n")[0]
+    return line or None
+
+def _capture_stream_chunk(stream_url: str, seconds: int = 30) -> str | None:
+    out = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    r = subprocess.run([
+        "ffmpeg", "-y", "-i", stream_url,
+        "-t", str(seconds), "-ar", "16000", "-ac", "1", "-f", "wav", out.name,
+    ], capture_output=True)
+    return out.name if r.returncode == 0 else None
+
+def _stream_capture(url: str):
+    print("Resolving stream URL...")
+    stream_url = _resolve_stream(url)
+    if not stream_url:
+        print("Could not resolve stream. Make sure yt-dlp and ffmpeg are installed.")
+        return
+    print("Stream active. Capturing 30s chunks. Ctrl+C to stop.\n")
+    while True:
+        path = _capture_stream_chunk(stream_url)
+        if not path:
+            continue
+        result = transcribe_file(path)
+        os.unlink(path)
+        if result:
+            print(f"[transcript] {result}")
+            transcript_queue.put(result)
+
+def run_stream():
+    url = input("Stream URL (YouTube live, BBC, etc.): ").strip()
+    threading.Thread(target=_stream_capture, args=(url,), daemon=True).start()
+    fact_check_loop()
+
+
+# ── mode 3: article URL ───────────────────────────────────────────────────────
+
+def _fetch_article(url: str) -> str | None:
+    from urllib.request import urlopen, Request
+    try:
+        req = Request(
+            f"https://r.jina.ai/{url}",
+            headers={"Accept": "text/plain", "User-Agent": "Mozilla/5.0"},
+        )
+        return urlopen(req, timeout=15).read().decode("utf-8")
+    except Exception:
+        return None
+
+def _clean_article(raw: str) -> str:
+    import re
+    # drop Jina header block (Title/URL/Published lines at top)
+    lines = raw.split("\n")
+    start = 0
+    for i, line in enumerate(lines):
+        if line.strip() == "" and i > 2:
+            start = i + 1
+            break
+    content = "\n".join(lines[start:])
+    # strip markdown noise
+    content = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", content)        # images
+    content = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", content)    # links → text
+    content = re.sub(r"https?://\S+", "", content)                 # bare URLs
+    content = re.sub(r"^#{1,6}\s+", "", content, flags=re.MULTILINE)  # headers
+    content = re.sub(r"\*{1,2}([^*]+)\*{1,2}", r"\1", content)    # bold/italic
+    # collect non-empty paragraphs
+    paragraphs = [p.strip() for p in content.split("\n\n") if len(p.strip()) > 40]
+    return "\n".join(f"[SPEAKER_A] {p}" for p in paragraphs[:25])
+
+def run_article():
+    url = input("Article URL: ").strip()
+    print("Fetching article...")
+    raw = _fetch_article(url)
+    if not raw:
+        print("Could not fetch that URL.")
+        return
+    text = _clean_article(raw)
+    if not text:
+        print("Could not extract article content.")
+        return
+    count = text.count("[SPEAKER_A]")
+    print(f"Extracted {count} paragraphs. Fact-checking...\n")
+    results = fact_check(text)
+    if results:
+        show_results(results)
+    else:
+        print("No checkable claims found.")
+
+
+# ── mode 4: paste text ────────────────────────────────────────────────────────
+
+def run_text():
+    print("Paste your text, then press Enter three times:")
+    lines = []
+    while True:
+        line = input()
+        if not line and lines and not lines[-1]:
+            break
+        lines.append(line)
+    text = "\n".join(lines).strip()
+    if not text:
+        return
+    print("\nFact-checking...\n")
+    results = fact_check(text)
+    if results:
+        show_results(results)
+    else:
+        print("No checkable claims found.")
+
+
+# ── entry point ───────────────────────────────────────────────────────────────
+
+MODES = {
+    "1": ("Microphone (live)",              run_mic),
+    "2": ("Live stream URL (YouTube/news)", run_stream),
+    "3": ("Article URL",                    run_article),
+    "4": ("Paste text / paragraph",         run_text),
+}
+
+def main():
+    print("Real-Time Fact Checker\n")
+    for k, (label, _) in MODES.items():
+        print(f"  {k}. {label}")
+    choice = input("\n> ").strip()
+    _, fn = MODES.get(choice, (None, None))
+    if fn is None:
+        print("Invalid choice.")
+        return
+    try:
+        fn()
+    except KeyboardInterrupt:
+        print("\nStopped.")
+
+if __name__ == "__main__":
+    main()
