@@ -7,6 +7,8 @@ from pathlib import Path
 _deepinfra_client = None
 _tavily = None
 _system_prompt = None
+_gemma_model = None
+_gemma_tokenizer = None
 
 # Groq setup (commented out - using DeepInfra instead)
 # _groq = None
@@ -101,25 +103,36 @@ def _chat_deepinfra(system: str, user: str, max_tokens: int = 1000) -> str:
         print(f"[CHAT ERROR] {type(e).__name__}: {e}")
         raise
 
-def _chat_gemma(system: str, user: str, max_tokens: int = 1000) -> str:
-    try:
-        print("[DEBUG] API call to local Gemma 4 12B...")
+def _gemma_model_():
+    global _gemma_model, _gemma_tokenizer
+    if _gemma_model is None:
         from transformers import AutoTokenizer, AutoModelForCausalLM
         import torch
 
         model_id = "google/gemma-4-12b-it"
-        tokenizer = AutoTokenizer.from_pretrained(model_id)
-        model = AutoModelForCausalLM.from_pretrained(
+        print("[DEBUG] First run: downloading and loading Gemma 4 12B (~27GB)...")
+        print("[DEBUG] This takes 5-10 minutes. Please wait...\n")
+        _gemma_tokenizer = AutoTokenizer.from_pretrained(model_id)
+        _gemma_model = AutoModelForCausalLM.from_pretrained(
             model_id,
             dtype=torch.float16,
             device_map="auto"
         )
+        print("\n[DEBUG] Gemma 4 12B ready!\n")
+    return _gemma_model, _gemma_tokenizer
+
+def _chat_gemma(system: str, user: str, max_tokens: int = 1000) -> str:
+    try:
+        print("[DEBUG] Running local Gemma 4 12B inference...")
+        import torch
+        model, tokenizer = _gemma_model_()
 
         messages = [
             {"role": "user", "content": f"{system}\n\n{user}"}
         ]
         text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = tokenizer.encode(text, return_tensors="pt").to("cuda" if torch.cuda.is_available() else "cpu")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        inputs = tokenizer.encode(text, return_tensors="pt").to(device)
 
         outputs = model.generate(inputs, max_new_tokens=max_tokens, temperature=0.7)
         response = tokenizer.decode(outputs[0])
