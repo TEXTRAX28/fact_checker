@@ -110,15 +110,25 @@ def _gemma_model_():
         import torch
 
         model_id = "google/gemma-4-12b-it"
-        print("[DEBUG] First run: downloading and loading Gemma 4 12B (~27GB)...")
-        print("[DEBUG] This takes 5-10 minutes. Please wait...\n")
+        print("[DEBUG] Checking GPU...")
+        cuda_available = torch.cuda.is_available()
+        print(f"[DEBUG] CUDA available: {cuda_available}")
+
+        if not cuda_available:
+            print("[ERROR] CUDA not available. Gemma requires GPU. Install PyTorch CUDA:")
+            print("pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118")
+            raise RuntimeError("CUDA required for Gemma")
+
+        print("[DEBUG] Loading tokenizer...")
         _gemma_tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+        print("[DEBUG] Loading model (5-10 min, first run only)...")
         _gemma_model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            dtype=torch.float16,
-            device_map="auto"
+            torch_dtype=torch.float16,
+            device_map="cuda:0"
         )
-        print("\n[DEBUG] Gemma 4 12B ready!\n")
+        print("[DEBUG] Gemma 4 12B ready!\n")
     return _gemma_model, _gemma_tokenizer
 
 def _chat_gemma(system: str, user: str, max_tokens: int = 1000) -> str:
