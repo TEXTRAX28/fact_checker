@@ -123,10 +123,11 @@ def _gemma_model_():
         _gemma_tokenizer = AutoTokenizer.from_pretrained(model_id)
 
         print("[DEBUG] Loading model (5-10 min, first run only)...")
+        print("[DEBUG] This may show warnings from HuggingFace, that's normal.\n")
         _gemma_model = AutoModelForCausalLM.from_pretrained(
             model_id,
             torch_dtype=torch.float16,
-            device_map="cuda:0"
+            device_map="auto"
         )
         print("[DEBUG] Gemma 4 12B ready!\n")
     return _gemma_model, _gemma_tokenizer
