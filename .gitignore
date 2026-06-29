@@ -42,3 +42,5 @@ tempCodeRunnerFile.py
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
+CLAUDE.md
+STATUS.md
