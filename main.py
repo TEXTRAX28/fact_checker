@@ -92,6 +92,7 @@ def _stream_capture(url: str):
         return
     print("Stream active. Capturing 30s chunks. Ctrl+C to stop.\n")
     fail_count = 0
+    chunk_num = 0
     while True:
         path = _capture_stream_chunk(stream_url)
         if not path:
@@ -101,9 +102,13 @@ def _stream_capture(url: str):
                 break
             continue
         fail_count = 0
+        chunk_num += 1
         result = transcribe_file(path)
         os.unlink(path)
         if result:
+            # Replace [UNKNOWN] with speaker label based on chunk order
+            speaker_label = f"SPEAKER_{chr(64 + chunk_num)}"  # A, B, C, D, etc.
+            result = result.replace("[UNKNOWN]", f"[{speaker_label}]")
             print(f"[transcript] {result}")
             transcript_queue.put(result)
 
