@@ -18,7 +18,7 @@ audio_queue: queue.Queue = queue.Queue()
 transcript_queue: queue.Queue[str] = queue.Queue()
 
 
-# ── shared fact-check worker ──────────────────────────────────────────────────
+# fact checker 
 
 def fact_check_loop():
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
@@ -40,7 +40,7 @@ def fact_check_loop():
             futures -= done
 
 
-# ── mode 1: microphone ────────────────────────────────────────────────────────
+# Feature #1: mic
 
 def _mic_capture():
     import numpy as np
@@ -68,7 +68,7 @@ def run_mic():
     fact_check_loop()
 
 
-# ── mode 2: live stream URL ───────────────────────────────────────────────────
+# Feature #2: URL video such as youtube etc
 
 def _resolve_stream(url: str) -> str | None:
     r = subprocess.run(["yt-dlp", "-g", "-f", "bestaudio", url], capture_output=True, text=True)
@@ -91,10 +91,16 @@ def _stream_capture(url: str):
         print("Could not resolve stream. Make sure yt-dlp and ffmpeg are installed.")
         return
     print("Stream active. Capturing 30s chunks. Ctrl+C to stop.\n")
+    fail_count = 0
     while True:
         path = _capture_stream_chunk(stream_url)
         if not path:
+            fail_count += 1
+            if fail_count >= 3:  # Exit after 3 consecutive failures (stream ended)
+                print("\nStream ended.")
+                break
             continue
+        fail_count = 0
         result = transcribe_file(path)
         os.unlink(path)
         if result:
@@ -107,7 +113,7 @@ def run_stream():
     fact_check_loop()
 
 
-# ── mode 3: article URL ───────────────────────────────────────────────────────
+# Feature #3: 
 
 def _fetch_article(url: str) -> tuple[str | None, str]:
     from urllib.request import urlopen, Request
@@ -198,7 +204,7 @@ def run_article():
         print("No checkable claims found.")
 
 
-# ── mode 4: paste text ────────────────────────────────────────────────────────
+# Feature #4: Text
 
 def run_text():
     print("Paste your text, then press Enter three times:")
