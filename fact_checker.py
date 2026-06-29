@@ -3,11 +3,20 @@ import os
 import re
 from pathlib import Path
 
-_groq = None
+# DeepInfra API setup
+_deepinfra_client = None
 _tavily = None
 _system_prompt = None
 
-MODEL = "llama-3.3-70b-versatile"
+# Groq setup (commented out - using DeepInfra instead)
+# _groq = None
+
+# MODEL for Groq (archived)
+# MODEL = "llama-3.3-70b-versatile"
+
+# MODEL for DeepInfra
+MODEL = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
 
 EXTRACT_PROMPT = """Extract the 10 most specific and verifiable factual claims from the text.
 Return a JSON array. Each item must have:
@@ -38,12 +47,24 @@ Skip any claim where confidence would be below 60 (omit it from the array).
 Return ONLY the JSON array, no other text."""
 
 
-def _groq_():
-    global _groq
-    if _groq is None:
-        from groq import Groq
-        _groq = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    return _groq
+# DeepInfra client (OpenAI-compatible)
+def _deepinfra_():
+    global _deepinfra_client
+    if _deepinfra_client is None:
+        from openai import OpenAI
+        _deepinfra_client = OpenAI(
+            api_key=os.getenv("DEEPINFRA_API_KEY"),
+            base_url=DEEPINFRA_BASE_URL
+        )
+    return _deepinfra_client
+
+# Groq client (archived - commented out)
+# def _groq_():
+#     global _groq
+#     if _groq is None:
+#         from groq import Groq
+#         _groq = Groq(api_key=os.getenv("GROQ_API_KEY"))
+#     return _groq
 
 def _tavily_():
     global _tavily
@@ -53,7 +74,8 @@ def _tavily_():
     return _tavily
 
 def _chat(system: str, user: str, max_tokens: int = 1000) -> str:
-    response = _groq_().chat.completions.create(
+    # Using DeepInfra (OpenAI-compatible)
+    response = _deepinfra_().chat.completions.create(
         model=MODEL,
         max_tokens=max_tokens,
         messages=[
@@ -62,6 +84,18 @@ def _chat(system: str, user: str, max_tokens: int = 1000) -> str:
         ],
     )
     return response.choices[0].message.content or ""
+
+# Groq chat function (archived - commented out)
+# def _chat_groq(system: str, user: str, max_tokens: int = 1000) -> str:
+#     response = _groq_().chat.completions.create(
+#         model=MODEL,
+#         max_tokens=max_tokens,
+#         messages=[
+#             {"role": "system", "content": system},
+#             {"role": "user", "content": user},
+#         ],
+#     )
+#     return response.choices[0].message.content or ""
 
 def _parse_json_array(text: str) -> list:
     text = re.sub(r"```(?:json)?\n?|```", "", text)

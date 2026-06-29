@@ -2,16 +2,27 @@ import os
 import wave
 import tempfile
 import numpy as np
-from groq import Groq
+
+# Local Whisper (faster-whisper)
+_model = None
+
+# Groq client (archived - commented out)
+# from groq import Groq
+# _client = None
+# def _groq():
+#     global _client
+#     if _client is None:
+#         _client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+#     return _client
 
 SAMPLE_RATE = 16000
-_client = None
 
-def _groq():
-    global _client
-    if _client is None:
-        _client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    return _client
+def _whisper_model():
+    global _model
+    if _model is None:
+        from faster_whisper import WhisperModel
+        _model = WhisperModel("base", device="cuda", compute_type="float16")
+    return _model
 
 def _save_wav(audio: np.ndarray) -> str:
     f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
@@ -23,14 +34,25 @@ def _save_wav(audio: np.ndarray) -> str:
     return f.name
 
 def _transcribe_path(path: str) -> str | None:
-    with open(path, "rb") as f:
-        result = _groq().audio.transcriptions.create(
-            file=("audio.wav", f),
-            model="whisper-large-v3",
-            response_format="text",
-        )
-    text = str(result).strip()
-    return f"[UNKNOWN] {text}" if text else None
+    try:
+        model = _whisper_model()
+        segments, _ = model.transcribe(path, language="id")
+        text = " ".join(segment.text for segment in segments).strip()
+        return f"[UNKNOWN] {text}" if text else None
+    except Exception as e:
+        print(f"Whisper error: {e}")
+        return None
+
+# Groq transcription (archived - commented out)
+# def _transcribe_path_groq(path: str) -> str | None:
+#     with open(path, "rb") as f:
+#         result = _groq().audio.transcriptions.create(
+#             file=("audio.wav", f),
+#             model="whisper-large-v3",
+#             response_format="text",
+#         )
+#     text = str(result).strip()
+#     return f"[UNKNOWN] {text}" if text else None
 
 def transcribe_chunk(audio: np.ndarray) -> str | None:
     path = _save_wav(audio)

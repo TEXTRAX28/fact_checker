@@ -35,10 +35,10 @@ A real-time fact-checker that verifies claims from 4 input sources using Groq LL
 
 ## How to Run
 
-\\\ash
+```
 cd "C:\Users\natan\VSC Code\fact-checker"
 python main.py
-\\\
+```
 
 Then choose:
 - 1 = Microphone (Coming Soon)
@@ -51,16 +51,15 @@ Then choose:
 ## Environment Setup
 
 Create .env file:
-\\\
+```
 GROQ_API_KEY=gsk_...
 TAVILY_API_KEY=tvly_...
-HUGGINGFACE_TOKEN=hf_...    (Only for Mode 1)
-\\\
+```
 
 Install dependencies:
-\\\ash
+```
 pip install -r requirements.txt
-\\\
+```
 
 ---
 
@@ -80,7 +79,7 @@ pip install -r requirements.txt
 
 ## File Structure
 
-\\\
+```
 fact-checker/
 ├── main.py           (Entry point, 4 modes)
 ├── fact_checker.py   (Groq LLM + Tavily search)
@@ -93,7 +92,7 @@ fact-checker/
 ├── requirements.txt  (Dependencies)
 ├── .env              (API keys - GITIGNORED)
 └── .gitignore        (Clean rules)
-\\\
+```
 
 ---
 

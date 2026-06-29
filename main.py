@@ -12,13 +12,11 @@ load_dotenv() or load_dotenv(".env.example")
 
 SAMPLE_RATE = 16000
 CHUNK_SECONDS = 5
-SILENCE_THRESHOLD = 0.01  # ponytail: raise if mic picks up too much background noise
+SILENCE_THRESHOLD = 0.01 
 
 audio_queue: queue.Queue = queue.Queue()
 transcript_queue: queue.Queue[str] = queue.Queue()
 
-
-# fact checker 
 
 def fact_check_loop():
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
@@ -40,10 +38,10 @@ def fact_check_loop():
             futures -= done
 
 
-# Feature #1: mic (DISABLED — Coming Soon)
+# Feature #1: mic (coming soon)
 
 def run_mic():
-    print("\n⏳ Mode 1 (Microphone) — Coming Soon\n")
+    print("Mode 1 (Microphone) — Coming Soon\n")
     print("This feature is under development. Requires:")
     print("  • faster-whisper (local transcription)")
     print("  • pyannote.audio (speaker diarization)")
@@ -55,7 +53,6 @@ def run_mic():
 
 
 # Feature #2: URL video such as youtube etc
-
 def _resolve_stream(url: str) -> str | None:
     r = subprocess.run(["yt-dlp", "-g", "-f", "bestaudio", url], capture_output=True, text=True)
     line = r.stdout.strip().split("\n")[0]
@@ -112,8 +109,7 @@ def run_stream():
     fact_check_loop()
 
 
-# Feature #3: 
-
+# Feature #3: URL
 def _fetch_article(url: str) -> tuple[str | None, str]:
     from urllib.request import urlopen, Request
     import json
@@ -204,7 +200,6 @@ def run_article():
 
 
 # Feature #4: Text
-
 def run_text():
     print("Paste your text, then press Enter three times:")
     lines = []
@@ -227,9 +222,7 @@ def run_text():
         show_results(results)
     else:
         print("No checkable claims found.")
-
-
-# ── entry point ───────────────────────────────────────────────────────────────
+        
 
 MODES = {
     "1": ("Microphone (live)",              run_mic),
