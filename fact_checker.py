@@ -73,7 +73,17 @@ def _tavily_():
         _tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
     return _tavily
 
-def _chat(system: str, user: str, max_tokens: int = 1000) -> str:
+def _chat(system: str, user: str, max_tokens: int = 1000, model_type: str = None) -> str:
+    # Use specified model_type or fall back to ACTIVE_MODEL setting
+    if model_type is None:
+        model_type = os.getenv("ACTIVE_MODEL", "deepinfra").lower()
+
+    if model_type == "gemma":
+        return _chat_gemma(system, user, max_tokens)
+    else:
+        return _chat_deepinfra(system, user, max_tokens)
+
+def _chat_deepinfra(system: str, user: str, max_tokens: int = 1000) -> str:
     # Using DeepInfra (OpenAI-compatible)
     try:
         print(f"[DEBUG] API call to DeepInfra (model={MODEL}, max_tokens={max_tokens})...")
@@ -89,6 +99,37 @@ def _chat(system: str, user: str, max_tokens: int = 1000) -> str:
         return response.choices[0].message.content or ""
     except Exception as e:
         print(f"[CHAT ERROR] {type(e).__name__}: {e}")
+        raise
+
+def _chat_gemma(system: str, user: str, max_tokens: int = 1000) -> str:
+    try:
+        print("[DEBUG] API call to local Gemma 4 12B...")
+        from transformers import AutoTokenizer, AutoModelForCausalLM
+        import torch
+
+        model_id = "google/gemma-4-12b-it"
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            dtype=torch.float16,
+            device_map="auto"
+        )
+
+        messages = [
+            {"role": "user", "content": f"{system}\n\n{user}"}
+        ]
+        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = tokenizer.encode(text, return_tensors="pt").to("cuda" if torch.cuda.is_available() else "cpu")
+
+        outputs = model.generate(inputs, max_new_tokens=max_tokens, temperature=0.7)
+        response = tokenizer.decode(outputs[0])
+
+        print("[DEBUG] Gemma response received")
+        if "[/INST]" in response:
+            response = response.split("[/INST]")[-1].strip()
+        return response
+    except Exception as e:
+        print(f"[CHAT ERROR - Gemma] {type(e).__name__}: {e}")
         raise
 
 # Groq chat function (archived - commented out)
@@ -136,7 +177,90 @@ def _search(query: str) -> tuple[str, list[str]]:
     text = "\n\n".join(f"[{r['url']}]\n{r['content'][:600]}" for r in results)
     return text, urls
 
+def compare_fact_check(transcript: str) -> dict:
+    try:
+        print("\n[COMPARE MODE] Running both models...\n")
+        deepinfra_results = _fact_check_with_model(transcript, "deepinfra")
+        print("\n" + "="*60 + "\n")
+        gemma_results = _fact_check_with_model(transcript, "gemma")
+
+        return {
+            "deepinfra": deepinfra_results,
+            "gemma": gemma_results,
+            "transcript": transcript
+        }
+    except Exception as e:
+        print(f"[ERROR] Comparison failed: {type(e).__name__}: {e}")
+        return {}
+
+def _fact_check_with_model(transcript: str, model_type: str) -> list[dict]:
+    try:
+        if not transcript or len(transcript.strip()) < 10:
+            print("ERROR: Text too short to analyze (minimum 10 characters)")
+            return []
+
+        # step 1: extract claims
+        try:
+            print(f"[{model_type.upper()}] Extracting claims...")
+            raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=2500, model_type=model_type)
+            claims = [c for c in _parse_json_array(raw) if isinstance(c, dict) and c.get("claim")]
+            print(f"[{model_type.upper()}] Found {len(claims)} claims")
+
+            if not claims:
+                print(f"[{model_type.upper()}] No checkable claims found")
+                return []
+        except Exception as e:
+            print(f"[{model_type.upper()}] Extraction error: {type(e).__name__}: {e}")
+            return []
+
+        # step 2: search all claims
+        try:
+            print(f"[{model_type.upper()}] Searching evidence...")
+            with __import__("concurrent.futures", fromlist=["ThreadPoolExecutor"]).ThreadPoolExecutor() as pool:
+                search_results = list(pool.map(lambda c: _search(c["query"]), claims))
+        except Exception as e:
+            print(f"[{model_type.upper()}] Search error: {type(e).__name__}: {e}")
+            return []
+
+        # step 3: verify claims
+        try:
+            print(f"[{model_type.upper()}] Verifying claims...")
+            context = ""
+            for item, (search_text, _) in zip(claims, search_results):
+                context += f"\n---\nSPEAKER: {item.get('speaker', 'UNKNOWN')}\nCLAIM: {item['claim']}\nSEARCH RESULTS:\n{search_text}\n"
+
+            raw_verdicts = _chat(VERIFY_PROMPT, context, max_tokens=3500, model_type=model_type)
+            verdicts = [v for v in _parse_json_array(raw_verdicts) if isinstance(v, dict) and v.get("verdict")]
+
+            if not verdicts:
+                print(f"[{model_type.upper()}] No verdicts returned")
+                return []
+
+            # inject sources
+            for verdict, (_, urls) in zip(verdicts, search_results):
+                if not verdict.get("sources"):
+                    verdict["sources"] = urls[:3]
+                verdict["model"] = model_type.upper()
+
+            print(f"[{model_type.upper()}] Complete: {len(verdicts)} claims verified")
+            return verdicts
+        except Exception as e:
+            print(f"[{model_type.upper()}] Verification error: {type(e).__name__}: {e}")
+            return []
+
+    except Exception as e:
+        print(f"[{model_type.upper()}] Unexpected error: {type(e).__name__}: {e}")
+        return []
+
 def fact_check(transcript: str) -> list[dict]:
+    # Handle compare mode
+    if os.getenv("ACTIVE_MODEL", "").lower() == "compare":
+        result = compare_fact_check(transcript)
+        if result:
+            from display import show_comparison
+            show_comparison(result)
+        return []
+
     try:
         if not transcript or len(transcript.strip()) < 10:
             print("ERROR: Text too short to analyze (minimum 10 characters)")

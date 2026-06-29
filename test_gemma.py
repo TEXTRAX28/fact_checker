@@ -1,7 +1,6 @@
 """Test Gemma 4 12B locally"""
 
 print("Testing Gemma 4 12B...")
-print("(This will download ~27GB model on first run — coffee time!)\n")
 
 try:
     from transformers import AutoTokenizer, AutoModelForCausalLM

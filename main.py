@@ -273,6 +273,25 @@ MODES = {
 
 def main():
     print("Real-Time Fact Checker\n")
+
+    # Model selection
+    print("Model:")
+    print("  1. DeepInfra Llama 3.3 70B (API)")
+    print("  2. Gemma 4 12B (local)")
+    print("  3. Compare both\n")
+    model_choice = input("Choose model [1-3] (default: 1): ").strip() or "1"
+
+    if model_choice == "3":
+        os.environ["ACTIVE_MODEL"] = "compare"
+    elif model_choice == "2":
+        os.environ["ACTIVE_MODEL"] = "gemma"
+    else:
+        os.environ["ACTIVE_MODEL"] = "deepinfra"
+
+    print(f"Model: {os.environ.get('ACTIVE_MODEL').upper()}\n")
+
+    # Mode selection
+    print("Input mode:")
     for k, (label, _) in MODES.items():
         print(f"  {k}. {label}")
     choice = input("\n> ").strip()
