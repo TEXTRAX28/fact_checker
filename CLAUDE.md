@@ -30,11 +30,11 @@ UI Display (verdict, confidence %, explanation, source)
 
 | Layer | Tool | Reason |
 |---|---|---|
-| Transcription | `faster-whisper` (local) | Fast, accurate, runs offline |
-| Speaker Diarization | `pyannote.audio` | Identifies who is speaking |
-| LLM | Claude Sonnet via Anthropic API | Claim extraction + verdict |
-| Web Search | Anthropic web search tool (built-in) | Grounded, no hallucination |
-| UI | Streamlit or terminal output | Fast to build, readable |
+| Transcription | Groq Whisper API | Fast, accurate, low latency |
+| Speaker Diarization | `pyannote.audio` (mode 1 only) | Identifies who is speaking |
+| LLM | Groq (llama-3.3-70b-versatile) | Claim extraction + verdict |
+| Web Search | Tavily Search API | Grounded, reliable sources |
+| UI | Terminal output | Fast to build, readable |
 | Audio | `sounddevice` + `numpy` | Low-latency mic capture |
 
 ---
@@ -57,34 +57,32 @@ UI Display (verdict, confidence %, explanation, source)
 
 ---
 
-## System Prompt Location
+## System Prompts
 
-`system_prompt.md` — pass the full contents as the `system` parameter in every Claude API call.
+- `EXTRACT_PROMPT` (fact_checker.py) — instructs LLM to extract 10 most verifiable claims
+- `VERIFY_PROMPT` (fact_checker.py) — instructs LLM to verify claims against search results
+- `system_prompt.md` — archived reference documentation (not currently used in API calls)
 
 ---
 
-## Claude API Call Structure
+## LLM Call Structure (Groq)
 
 ```python
-import anthropic
+from groq import Groq
 
-client = anthropic.Anthropic()
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-response = client.messages.create(
-    model="claude-sonnet-4-6",
+response = client.chat.completions.create(
+    model="llama-3.3-70b-versatile",
     max_tokens=1500,
-    system=open("system_prompt.md").read(),
-    tools=[{"type": "web_search_20250305", "name": "web_search"}],
     messages=[
-        {
-            "role": "user",
-            "content": transcript_chunk  # e.g. "[SPEAKER_A] The rate dropped to 3.4%."
-        }
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": transcript_chunk}  # e.g. "[SPEAKER_A] The rate dropped to 3.4%."
     ]
 )
 ```
 
-Extract the text content block from `response.content` and parse it as JSON.
+Extract text from `response.choices[0].message.content` and parse it as JSON.
 
 ---
 
