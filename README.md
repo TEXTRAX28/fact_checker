@@ -21,6 +21,7 @@ The system accepts information from different sources, including live microphone
 After the claims are extracted, the system searches the internet using Tavily's web search API to find reliable evidence. Multiple searches are performed at the same time to improve speed. The Llama 3.3 70B model then compares each claim with the search results and classifies it as TRUE, FALSE, MISLEADING, or UNVERIFIABLE. Each result also includes a confidence score (60–100%), a short explanation, and links to the supporting sources.
 
 The system is designed to work in real time. For live streams, it processes 30-second audio segments, skips repeated content to avoid checking the same claim multiple times, and detects when different people are speaking. For website URLs, it uses a three-step fallback method: first trying Jina Reader to extract the article, then the Wayback Machine if the page cannot be accessed, and finally Tavily Search to gather evidence from other trusted sources. This allows the system to verify content even if an article is behind a paywall or blocks automated access. It can also verify multiple claims from a single input while avoiding duplicate fact-checking.
+
 ---
 
 ## Tech Stack
