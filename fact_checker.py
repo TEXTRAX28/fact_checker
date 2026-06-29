@@ -99,7 +99,7 @@ def _search(query: str) -> tuple[str, list[str]]:
 def fact_check(transcript: str) -> list[dict]:
     try:
         # step 1: extract claims + search queries (1 LLM call)
-        raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=1500)
+        raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=2500)
         claims = [c for c in _parse_json_array(raw) if isinstance(c, dict) and c.get("claim")]
         if not claims:
             return []
