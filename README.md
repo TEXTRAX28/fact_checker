@@ -5,32 +5,22 @@
 A real-time fact-checking tool that listens to speech (microphone, live streams, articles, or text) and instantly verifies claims against web sources. Returns verdicts (TRUE/FALSE/MISLEADING/UNVERIFIABLE) with confidence scores and source links.
 
 **4 input modes:**
-- 🎤 **Microphone** — Live speech fact-checking
-- 📺 **Live stream URL** — YouTube/news broadcast verification
-- 🔗 **Article URL** — Web article claim extraction & verification
-- 📝 **Paste text** — Copy-paste content fact-checking
+- **Microphone** -> Live speech fact-checking
+- **Live stream URL** -> YouTube/news broadcast verification
+- **Article URL** -> Web article claim extraction & verification
+- **Paste text** -> Copy-paste content fact-checking
 
 ---
 
 ## In-Depth Project Overview
 
-The Fact Checker is an intelligent verification system designed to combat misinformation in real-time. It operates on a three-stage pipeline: **capture → extract → verify**.
+The Fact Checker is an intelligent verification system designed to combat misinformation in real-time. It operates on a three-stage pipeline: **capture -> extract -> verify**.
 
-At its core, the system accepts factual claims from multiple sources (live speech via microphone, streaming video URLs from YouTube or news networks, web articles via URL, or manually pasted text). The input is processed through Groq's Whisper API (for audio transcription) or direct text intake. Claims are then extracted using Groq's llama-3.3-70b language model, which identifies the 10 most verifiable and specific factual statements from the input while filtering out opinions, predictions, and vague rhetoric.
+The system accepts information from different sources, including live microphone input, YouTube or news livestreams, website URLs, and manually pasted text. If the input contains audio, it uses Groq's Whisper API to convert speech into text. Text is then analyzed by Groq's Llama 3.3 70B model, which extracts the 10 most specific and fact-based claims, while ignoring opinions, predictions, or unclear statements.
 
-Once claims are extracted, the system immediately searches for supporting or contradicting evidence using Tavily's web search API, conducting parallel searches for speed. Finally, the same 70B language model evaluates each claim against the search results and assigns a verdict (TRUE for claims matching sources, FALSE for contradictions, MISLEADING for technically true but deceptively framed claims, and UNVERIFIABLE for conflicting sources). Each verdict includes a confidence score (60-100%), a concise explanation (1-3 sentences), and direct source citations.
+After the claims are extracted, the system searches the internet using Tavily's web search API to find reliable evidence. Multiple searches are performed at the same time to improve speed. The Llama 3.3 70B model then compares each claim with the search results and classifies it as TRUE, FALSE, MISLEADING, or UNVERIFIABLE. Each result also includes a confidence score (60–100%), a short explanation, and links to the supporting sources.
 
-The system is built for **real-time performance**: Mode 2 (live streams) continuously captures 30-second audio chunks, detects and skips duplicate content to avoid redundant fact-checking, and intelligently identifies speaker transitions. Mode 3 (URLs) includes a robust 3-tier fallback chain—Jina reader for direct content extraction, Wayback Machine for archived versions, and Tavily search for coverage-based verification—ensuring articles behind paywalls or bot-blocked pages can still be fact-checked via alternative sources. The system scales to handle multiple claims per input and provides deduplication to prevent re-checking identical statements.
-
-**Use cases include:**
-- Journalists and media outlets verifying breaking news in real-time
-- Debate moderators fact-checking live statements during broadcasts
-- Content creators identifying misinformation in viral videos or articles
-- Researchers and fact-checking organizations automating claim verification
-- Indonesian news verification with specialized source credibility hierarchy
-
-The fact-checker prioritizes accuracy over speed: search snippets are 600 characters (not truncated), verification uses 3500 tokens to support 10+ concurrent verdicts, and Indonesian news sources are weighted by editorial credibility.
-
+The system is designed to work in real time. For live streams, it processes 30-second audio segments, skips repeated content to avoid checking the same claim multiple times, and detects when different people are speaking. For website URLs, it uses a three-step fallback method: first trying Jina Reader to extract the article, then the Wayback Machine if the page cannot be accessed, and finally Tavily Search to gather evidence from other trusted sources. This allows the system to verify content even if an article is behind a paywall or blocks automated access. It can also verify multiple claims from a single input while avoiding duplicate fact-checking.
 ---
 
 ## Tech Stack
@@ -49,24 +39,20 @@ The fact-checker prioritizes accuracy over speed: search snippets are 600 charac
 | **Output** | JSON + Terminal UI | Color-coded results display |
 
 **Cloud Services (API-based):**
-- **Groq** — LLM inference (Llama 70B) + Whisper transcription
+- **Groq** = LLM inference (Llama 70B) + Whisper transcription
   - Free tier: ~5,000 tokens/day
-  - Pricing: \.15/1M input tokens, \.60/1M output tokens
-- **Tavily** — Web search API
+- **Tavily** = Web search API
   - Free tier: ~100 searches/month
   - Returns top 3 results per query with 600-char snippets
-- **Jina Reader** — Article text extraction
+- **Jina Reader** = Article text extraction
   - No auth required, free tier available
-- **Wayback Machine** — Internet Archive snapshots
+- **Wayback Machine** = Internet Archive snapshots
   - Free, no authentication needed
 
-**Local Optional Dependencies (Mode 1 only):**
-- aster-whisper — Local speech-to-text (GPU-accelerated fallback)
-- pyannote.audio — Speaker diarization (requires HuggingFace token)
-- sounddevice — Microphone input
-- 
-umpy — Audio processing
-
+**Local Optional Dependencies (Mode 1 only)(Upcoming):**
+- faster-whisper = Local speech-to-text (GPU-accelerated fallback)
+- pyannote.audio = Speaker diarization (requires HuggingFace token)
+- sounddevice = Microphone input
 ---
 
 ## How It Works
@@ -74,13 +60,13 @@ umpy — Audio processing
 ### Step 1: Capture
 - **Microphone:** Record audio in 30-second chunks, skip silence
 - **Live Stream:** Download best audio quality, process in 30-second segments
-- **URL:** Fetch article via Jina → Wayback → Tavily fallback chain
+- **URL:** Fetch article via Jina -> Wayback -> Tavily fallback chain
 - **Text:** Accept manually pasted content
 
 ### Step 2: Extract Claims
 - Convert audio to text (Whisper API)
 - Send transcript to Llama 70B model
-- Model extracts top 10 most specific, verifiable claims
+- Model extracts specific and verifable claims
 - Filter out opinions, predictions, rhetorical questions
 
 ### Step 3: Verify
@@ -99,11 +85,9 @@ umpy — Audio processing
 ---
 
 ## Quick Start
-
-`ash
+```bash
 python main.py
-`
+```
 
 Choose a mode (1-4), provide input, and get instant verdicts with sources.
 
-See [HANDOFF.md](HANDOFF.md) for detailed setup and troubleshooting.
