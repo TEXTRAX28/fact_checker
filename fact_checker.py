@@ -93,7 +93,7 @@ def _parse_json_object(text: str) -> dict:
 def _search(query: str) -> tuple[str, list[str]]:
     results = _tavily_().search(query, max_results=3).get("results", [])
     urls = [r["url"] for r in results]
-    text = "\n\n".join(f"[{r['url']}]\n{r['content'][:300]}" for r in results)
+    text = "\n\n".join(f"[{r['url']}]\n{r['content'][:600]}" for r in results)
     return text, urls
 
 def fact_check(transcript: str) -> list[dict]:

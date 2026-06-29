@@ -109,16 +109,57 @@ def run_stream():
 
 # ── mode 3: article URL ───────────────────────────────────────────────────────
 
-def _fetch_article(url: str) -> str | None:
+def _fetch_article(url: str) -> tuple[str | None, str]:
     from urllib.request import urlopen, Request
+    import json
+
+    warning = ""
+    content = None
+
+    # Tier 1: Jina reader
     try:
         req = Request(
             f"https://r.jina.ai/{url}",
             headers={"Accept": "text/plain", "User-Agent": "Mozilla/5.0"},
         )
-        return urlopen(req, timeout=15).read().decode("utf-8")
+        content = urlopen(req, timeout=15).read().decode("utf-8")
+        if len(content) >= 500:
+            return content, ""
+        warning = "⚠ Could not fully read that page (paywalled, bot-blocked, or JS-rendered).\n"
     except Exception:
-        return None
+        pass
+
+    # Tier 2: Wayback Machine
+    if not content or len(content) < 500:
+        try:
+            req = Request(
+                f"https://archive.org/wayback/available?url={url}",
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            resp = json.loads(urlopen(req, timeout=10).read().decode("utf-8"))
+            snapshot_url = resp.get("archived_snapshots", {}).get("closest", {}).get("url")
+            if snapshot_url:
+                req = Request(snapshot_url, headers={"User-Agent": "Mozilla/5.0"})
+                content = urlopen(req, timeout=15).read().decode("utf-8")
+                if len(content) >= 500:
+                    return content, warning + "  Fetched from Wayback Machine.\n" if warning else ""
+        except Exception:
+            pass
+
+    # Tier 3: Tavily search
+    if not content or len(content) < 500:
+        try:
+            from fact_checker import _tavily_
+            domain = url.split("/")[2]
+            results = _tavily_().search(f"site:{domain}", max_results=1)
+            if results.get("results"):
+                content = results["results"][0]["content"]
+                if len(content) >= 500:
+                    return content, warning + "  Fact-checking based on search coverage.\n" if warning else ""
+        except Exception:
+            pass
+
+    return None, warning + "  Could not fetch any usable content.\n" if warning else "Could not fetch article.\n"
 
 def _clean_article(raw: str) -> str:
     import re
@@ -138,10 +179,12 @@ def _clean_article(raw: str) -> str:
 def run_article():
     url = input("Article URL: ").strip()
     print("Fetching article...")
-    raw = _fetch_article(url)
+    raw, warning = _fetch_article(url)
     if not raw:
-        print("Could not fetch that URL.")
+        print(warning or "Could not fetch that URL.")
         return
+    if warning:
+        print(warning)
     text = _clean_article(raw)
     if not text:
         print("Could not extract article content.")
