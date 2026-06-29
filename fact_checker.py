@@ -113,7 +113,7 @@ def fact_check(transcript: str) -> list[dict]:
         for item, (search_text, _) in zip(claims, search_results):
             context += f"\n---\nSPEAKER: {item.get('speaker', 'UNKNOWN')}\nCLAIM: {item['claim']}\nSEARCH RESULTS:\n{search_text}\n"
 
-        raw_verdicts = _chat(VERIFY_PROMPT, context, max_tokens=2000)
+        raw_verdicts = _chat(VERIFY_PROMPT, context, max_tokens=3500)
         verdicts = [v for v in _parse_json_array(raw_verdicts) if isinstance(v, dict) and v.get("verdict")]
 
         # inject sources if model didn't include them

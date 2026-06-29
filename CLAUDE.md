@@ -67,19 +67,19 @@ UI Display (verdict, confidence %, explanation, source)
 
 ## LLM Call Structure (Groq)
 
+Two separate API calls:
+
+**Step 1 — Claim Extraction (1500 tokens):**
 ```python
-from groq import Groq
+_chat(EXTRACT_PROMPT, transcript, max_tokens=1500)
+# Extracts top 10 verifiable claims
+```
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-
-response = client.chat.completions.create(
-    model="llama-3.3-70b-versatile",
-    max_tokens=1500,
-    messages=[
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": transcript_chunk}  # e.g. "[SPEAKER_A] The rate dropped to 3.4%."
-    ]
-)
+**Step 2 — Claim Verification (3500 tokens):**
+```python
+_chat(VERIFY_PROMPT, context_with_search_results, max_tokens=3500)
+# Verifies all extracted claims against search results
+# 3500 tokens supports 10+ verdicts (350 tokens per verdict)
 ```
 
 Extract text from `response.choices[0].message.content` and parse it as JSON.
