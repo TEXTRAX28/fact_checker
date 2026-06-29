@@ -40,32 +40,18 @@ def fact_check_loop():
             futures -= done
 
 
-# Feature #1: mic
-
-def _mic_capture():
-    import numpy as np
-    import sounddevice as sd
-    while True:
-        audio = sd.rec(SAMPLE_RATE * CHUNK_SECONDS, samplerate=SAMPLE_RATE, channels=1, dtype="float32")
-        sd.wait()
-        audio = audio.flatten()
-        if float(np.sqrt(np.mean(audio ** 2))) > SILENCE_THRESHOLD:
-            audio_queue.put(audio)
-
-def _transcription_worker():
-    from transcriber import transcribe_chunk
-    while True:
-        audio = audio_queue.get()
-        result = transcribe_chunk(audio)
-        if result:
-            print(f"[transcript] {result}")
-            transcript_queue.put(result)
+# Feature #1: mic (DISABLED — Coming Soon)
 
 def run_mic():
-    print("Listening via microphone. Ctrl+C to stop.\n")
-    threading.Thread(target=_mic_capture, daemon=True).start()
-    threading.Thread(target=_transcription_worker, daemon=True).start()
-    fact_check_loop()
+    print("\n⏳ Mode 1 (Microphone) — Coming Soon\n")
+    print("This feature is under development. Requires:")
+    print("  • faster-whisper (local transcription)")
+    print("  • pyannote.audio (speaker diarization)")
+    print("  • HUGGINGFACE_TOKEN environment variable\n")
+    print("For now, use:")
+    print("  • Mode 2: Live stream URLs")
+    print("  • Mode 3: Article URLs")
+    print("  • Mode 4: Paste text\n")
 
 
 # Feature #2: URL video such as youtube etc

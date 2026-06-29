@@ -13,7 +13,7 @@ A real-time fact-checker that verifies claims from 4 input sources using Groq LL
 | **Mode 3: Article URL** | ✅ Full | 3-tier fallback (Jina → Wayback → Tavily), paywalled warnings |
 | **Mode 4: Paste text** | ✅ Full | Clean article extraction, batch fact-checking |
 | **Mode 2: Live stream** | ✅ Working | Duplicate detection, speaker numbering (SPEAKER_A/B/C) |
-| **Mode 1: Microphone** | ⚠️ Untested | Requires `faster-whisper`, `pyannote.audio`, `HUGGINGFACE_TOKEN` |
+| **Mode 1: Microphone** | ⏳ Coming Soon | Disabled (too complex, requires 3+ libraries). Shows "Coming Soon" message. |
 
 ---
 
