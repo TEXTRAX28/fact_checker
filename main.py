@@ -4,10 +4,7 @@ import threading
 import subprocess
 import tempfile
 import concurrent.futures
-import numpy as np
-import sounddevice as sd
 from dotenv import load_dotenv
-from transcriber import transcribe_chunk, transcribe_file
 from fact_checker import fact_check
 from display import show_results
 
@@ -46,6 +43,8 @@ def fact_check_loop():
 # ── mode 1: microphone ────────────────────────────────────────────────────────
 
 def _mic_capture():
+    import numpy as np
+    import sounddevice as sd
     while True:
         audio = sd.rec(SAMPLE_RATE * CHUNK_SECONDS, samplerate=SAMPLE_RATE, channels=1, dtype="float32")
         sd.wait()
@@ -54,6 +53,7 @@ def _mic_capture():
             audio_queue.put(audio)
 
 def _transcription_worker():
+    from transcriber import transcribe_chunk
     while True:
         audio = audio_queue.get()
         result = transcribe_chunk(audio)
@@ -84,6 +84,7 @@ def _capture_stream_chunk(stream_url: str, seconds: int = 30) -> str | None:
     return out.name if r.returncode == 0 else None
 
 def _stream_capture(url: str):
+    from transcriber import transcribe_file
     print("Resolving stream URL...")
     stream_url = _resolve_stream(url)
     if not stream_url:
@@ -121,21 +122,16 @@ def _fetch_article(url: str) -> str | None:
 
 def _clean_article(raw: str) -> str:
     import re
-    # drop Jina header block (Title/URL/Published lines at top)
-    lines = raw.split("\n")
-    start = 0
-    for i, line in enumerate(lines):
-        if line.strip() == "" and i > 2:
-            start = i + 1
-            break
-    content = "\n".join(lines[start:])
-    # strip markdown noise
-    content = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", content)        # images
-    content = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", content)    # links → text
-    content = re.sub(r"https?://\S+", "", content)                 # bare URLs
-    content = re.sub(r"^#{1,6}\s+", "", content, flags=re.MULTILINE)  # headers
-    content = re.sub(r"\*{1,2}([^*]+)\*{1,2}", r"\1", content)    # bold/italic
-    # collect non-empty paragraphs
+    # strip Jina header (everything before and including "Markdown Content:")
+    if "Markdown Content:" in raw:
+        raw = raw.split("Markdown Content:", 1)[1].strip()
+    content = raw
+    # strip markdown noise (multiline-safe for images that span lines)
+    content = re.sub(r"!\[[\s\S]*?\]\([^)]*\)", "", content)
+    content = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", content)
+    content = re.sub(r"https?://\S+", "", content)
+    content = re.sub(r"^#{1,6}\s+", "", content, flags=re.MULTILINE)
+    content = re.sub(r"\*{1,2}([^*]+)\*{1,2}", r"\1", content)
     paragraphs = [p.strip() for p in content.split("\n\n") if len(p.strip()) > 40]
     return "\n".join(f"[SPEAKER_A] {p}" for p in paragraphs[:25])
 
@@ -169,10 +165,15 @@ def run_text():
         if not line and lines and not lines[-1]:
             break
         lines.append(line)
-    text = "\n".join(lines).strip()
-    if not text:
+    raw = "\n".join(lines).strip()
+    if not raw:
         return
-    print("\nFact-checking...\n")
+    text = _clean_article(raw)
+    if not text:
+        print("Could not extract any content.")
+        return
+    count = text.count("[SPEAKER_A]")
+    print(f"\nExtracted {count} paragraphs. Fact-checking...\n")
     results = fact_check(text)
     if results:
         show_results(results)

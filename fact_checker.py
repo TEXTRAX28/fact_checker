@@ -2,8 +2,6 @@ import json
 import os
 import re
 from pathlib import Path
-from groq import Groq
-from tavily import TavilyClient
 
 _groq = None
 _tavily = None
@@ -11,10 +9,11 @@ _system_prompt = None
 
 MODEL = "llama-3.3-70b-versatile"
 
-EXTRACT_PROMPT = """Extract every specific factual claim from the text that can be verified with a web search.
+EXTRACT_PROMPT = """Extract the 10 most specific and verifiable factual claims from the text.
 Return a JSON array. Each item must have:
   "claim": the exact claim as stated
   "query": a short search query to verify it
+  "speaker": the name or label of who made the claim (e.g. "Senator Davis", "SPEAKER_A") — use "UNKNOWN" only if truly unidentifiable
 
 Only include: statistics, numbers, dates, named events, quotes, scientific/medical/legal/historical facts.
 Skip: opinions, predictions, vague statements, rhetorical questions.
@@ -42,12 +41,14 @@ Return ONLY the JSON array, no other text."""
 def _groq_():
     global _groq
     if _groq is None:
+        from groq import Groq
         _groq = Groq(api_key=os.getenv("GROQ_API_KEY"))
     return _groq
 
 def _tavily_():
     global _tavily
     if _tavily is None:
+        from tavily import TavilyClient
         _tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
     return _tavily
 
@@ -67,8 +68,19 @@ def _parse_json_array(text: str) -> list:
     match = re.search(r"\[[\s\S]*\]", text)
     if not match:
         return []
-    parsed = json.loads(match.group())
-    return parsed if isinstance(parsed, list) else []
+    try:
+        parsed = json.loads(match.group())
+        return parsed if isinstance(parsed, list) else []
+    except json.JSONDecodeError:
+        objects = []
+        for m in re.finditer(r"\{[^{}]*\}", match.group()):
+            try:
+                obj = json.loads(m.group())
+                if isinstance(obj, dict):
+                    objects.append(obj)
+            except json.JSONDecodeError:
+                continue
+        return objects
 
 def _parse_json_object(text: str) -> dict:
     text = re.sub(r"```(?:json)?\n?|```", "", text)
@@ -79,15 +91,15 @@ def _parse_json_object(text: str) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 def _search(query: str) -> tuple[str, list[str]]:
-    results = _tavily_().search(query, max_results=5).get("results", [])
+    results = _tavily_().search(query, max_results=3).get("results", [])
     urls = [r["url"] for r in results]
-    text = "\n\n".join(f"[{r['url']}]\n{r['content']}" for r in results)
+    text = "\n\n".join(f"[{r['url']}]\n{r['content'][:300]}" for r in results)
     return text, urls
 
 def fact_check(transcript: str) -> list[dict]:
     try:
         # step 1: extract claims + search queries (1 LLM call)
-        raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=500)
+        raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=1500)
         claims = [c for c in _parse_json_array(raw) if isinstance(c, dict) and c.get("claim")]
         if not claims:
             return []
@@ -99,7 +111,7 @@ def fact_check(transcript: str) -> list[dict]:
         # step 3: verify all claims in one LLM call
         context = ""
         for item, (search_text, _) in zip(claims, search_results):
-            context += f"\n---\nCLAIM: {item['claim']}\nSEARCH RESULTS:\n{search_text}\n"
+            context += f"\n---\nSPEAKER: {item.get('speaker', 'UNKNOWN')}\nCLAIM: {item['claim']}\nSEARCH RESULTS:\n{search_text}\n"
 
         raw_verdicts = _chat(VERIFY_PROMPT, context, max_tokens=2000)
         verdicts = [v for v in _parse_json_array(raw_verdicts) if isinstance(v, dict) and v.get("verdict")]

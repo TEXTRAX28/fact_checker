@@ -171,13 +171,13 @@ C:\Users\natan\VSC Code\fact-checker\
 
 ```
 C:\Users\natan\VSC Code\fact-checker\
-├── CLAUDE.md               ← this file
+├── CLAUDE.md               ← claude file prompt
 ├── system_prompt.md        ← Claude system prompt
 ├── main.py                 ← entry point, mic capture loop
 ├── transcriber.py          ← Whisper + diarization
 ├── fact_checker.py         ← Claude API calls, claim parsing
 ├── display.py              ← UI rendering
-├── requirements.txt
+├── requirements.txt        ← requirements that needed
 └── .env
 ```
 

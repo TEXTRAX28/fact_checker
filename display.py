@@ -9,7 +9,7 @@ COLORS = {
 RESET = "\033[0m"
 
 def _bar(confidence: int) -> str:
-    filled = confidence // 5
+    filled = int(confidence) // 5
     return f"[{'█' * filled}{'░' * (20 - filled)}] {confidence}%"
 
 def _format_source(url: str) -> str:
