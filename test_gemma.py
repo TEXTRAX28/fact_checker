@@ -1,13 +1,13 @@
-"""Test Gemma 2 12B locally"""
+"""Test Gemma 4 12B locally"""
 
-print("Testing Gemma 2 12B...")
-print("(This will download ~26GB model on first run — coffee time!)\n")
+print("Testing Gemma 4 12B...")
+print("(This will download ~27GB model on first run — coffee time!)\n")
 
 try:
     from transformers import AutoTokenizer, AutoModelForCausalLM
     import torch
 
-    model_id = "google/gemma-2-12b-it"
+    model_id = "google/gemma-4-12b-it"
     print(f"Loading {model_id}...")
     print(f"GPU available: {torch.cuda.is_available()}")
 
@@ -19,7 +19,7 @@ try:
         device_map="auto"
     )
 
-    print("✅ Model loaded successfully!")
+    print("[OK] Model loaded successfully!")
 
     # Test a simple query
     messages = [
@@ -32,14 +32,14 @@ try:
     outputs = model.generate(inputs, max_new_tokens=100)
     response = tokenizer.decode(outputs[0])
 
-    print(f"✅ Test response:\n{response}\n")
-    print("✅ Gemma 2 12B is ready to use!")
+    print(f"[OK] Test response:\n{response}\n")
+    print("[OK] Gemma 4 12B is ready to use!")
 
 except ImportError as e:
-    print(f"❌ Missing library: {e}")
+    print(f"[ERROR] Missing library: {e}")
     print("Run: pip install transformers torch")
 except Exception as e:
-    print(f"❌ Error: {type(e).__name__}: {e}")
+    print(f"[ERROR] {type(e).__name__}: {e}")
     print("\nTroubleshooting:")
     print("- Make sure you have 6GB+ VRAM available")
     print("- Check CUDA installation: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118")

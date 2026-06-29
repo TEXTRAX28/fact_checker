@@ -14,8 +14,8 @@ if ACTIVE_MODEL == "deepinfra":
 
 elif ACTIVE_MODEL == "gemma":
     MODEL_TYPE = "local"
-    MODEL_NAME = "google/gemma-2-12b-it"
-    print(f"[CONFIG] Local Gemma 2 12B - GPU quantized (float16)")
+    MODEL_NAME = "google/gemma-4-12b-it"
+    print(f"[CONFIG] Local Gemma 4 12B - GPU quantized (float16)")
 
 else:
     raise ValueError(f"Unknown model: {ACTIVE_MODEL}. Use 'deepinfra' or 'gemma'")

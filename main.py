@@ -126,7 +126,7 @@ def _fetch_article(url: str) -> tuple[str | None, str]:
         content = urlopen(req, timeout=15).read().decode("utf-8")
         if len(content) >= 500:
             return content, ""
-        warning = "⚠ Could not fully read that page (paywalled, bot-blocked, or JS-rendered).\n"
+        warning = "[Warning] Could not fully read that page (paywalled, bot-blocked, or JS-rendered).\n"
     except Exception:
         pass
 

@@ -49,10 +49,10 @@ Extracted 1 paragraphs. Fact-checking...
 - Issue is between API call and result display
 
 **Debugging Done:**
-- ✅ API key in .env
-- ✅ openai library installed
-- ✅ Error handling catches exceptions
-- ⚠️ Need to verify API key is actually valid
+- [DONE] API key in .env
+- [DONE] openai library installed
+- [DONE] Error handling catches exceptions
+- [NOTE] Need to verify API key is actually valid
 
 **Next Steps:**
 `powershell

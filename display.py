@@ -10,10 +10,10 @@ RESET = "\033[0m"
 
 def _bar(confidence: int) -> str:
     filled = int(confidence) // 5
-    return f"[{'█' * filled}{'░' * (20 - filled)}] {confidence}%"
+    return f"[{'=' * filled}{'-' * (20 - filled)}] {confidence}%"
 
 def _format_source(url: str) -> str:
-    note = " ⚠ Wikipedia (community-edited)" if "wikipedia.org" in url else ""
+    note = " [Note: Wikipedia, community-edited]" if "wikipedia.org" in url else ""
     return f"{url}{note}"
 
 def show_results(results: list[dict]):
