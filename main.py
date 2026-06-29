@@ -178,50 +178,90 @@ def _clean_article(raw: str) -> str:
     return "\n".join(f"[SPEAKER_A] {p}" for p in paragraphs[:25])
 
 def run_article():
-    url = input("Article URL: ").strip()
-    print("Fetching article...")
-    raw, warning = _fetch_article(url)
-    if not raw:
-        print(warning or "Could not fetch that URL.")
-        return
-    if warning:
-        print(warning)
-    text = _clean_article(raw)
-    if not text:
-        print("Could not extract article content.")
-        return
-    count = text.count("[SPEAKER_A]")
-    print(f"Extracted {count} paragraphs. Fact-checking...\n")
-    results = fact_check(text)
-    if results:
-        show_results(results)
-    else:
-        print("No checkable claims found.")
+    try:
+        url = input("Article URL: ").strip()
+        if not url:
+            print("ERROR: URL cannot be empty")
+            return
+
+        print("Fetching article...")
+        try:
+            raw, warning = _fetch_article(url)
+            if not raw:
+                print(f"ERROR: {warning or 'Could not fetch that URL. Tried: Jina Reader → Wayback Machine → Tavily Search'}")
+                return
+            if warning:
+                print(warning)
+        except Exception as e:
+            print(f"ERROR while fetching: {type(e).__name__}: {e}")
+            return
+
+        try:
+            text = _clean_article(raw)
+            if not text:
+                print("ERROR: Could not extract any readable content from article (may be too short or heavily formatted)")
+                return
+        except Exception as e:
+            print(f"ERROR while cleaning article: {type(e).__name__}: {e}")
+            return
+
+        count = text.count("[SPEAKER_A]")
+        if count < 1:
+            print("ERROR: No paragraphs extracted from article")
+            return
+
+        print(f"Extracted {count} paragraphs. Fact-checking...\n")
+        results = fact_check(text)
+        if results:
+            show_results(results)
+        # else: fact_check() already prints the reason
+
+    except KeyboardInterrupt:
+        print("\nCancelled by user")
+    except Exception as e:
+        print(f"ERROR: Unexpected error: {type(e).__name__}: {e}")
 
 
 # Feature #4: Text
 def run_text():
-    print("Paste your text, then press Enter three times:")
-    lines = []
-    while True:
-        line = input()
-        if not line and lines and not lines[-1]:
-            break
-        lines.append(line)
-    raw = "\n".join(lines).strip()
-    if not raw:
-        return
-    text = _clean_article(raw)
-    if not text:
-        print("Could not extract any content.")
-        return
-    count = text.count("[SPEAKER_A]")
-    print(f"\nExtracted {count} paragraphs. Fact-checking...\n")
-    results = fact_check(text)
-    if results:
-        show_results(results)
-    else:
-        print("No checkable claims found.")
+    try:
+        print("Paste your text, then press Enter three times:")
+        lines = []
+        while True:
+            line = input()
+            if not line and lines and not lines[-1]:
+                break
+            lines.append(line)
+
+        raw = "\n".join(lines).strip()
+        if not raw:
+            print("ERROR: No text provided")
+            return
+
+        try:
+            text = _clean_article(raw)
+            if not text:
+                print("ERROR: Could not extract any content (text may be too short or heavily formatted)")
+                return
+        except Exception as e:
+            print(f"ERROR while cleaning text: {type(e).__name__}: {e}")
+            return
+
+        count = text.count("[SPEAKER_A]")
+        if count < 1:
+            print("ERROR: No paragraphs extracted from text")
+            return
+
+        print(f"\nExtracted {count} paragraphs. Fact-checking...\n")
+        results = fact_check(text)
+        if results:
+            show_results(results)
+        # else: fact_check() already prints the reason
+
+    except KeyboardInterrupt:
+        print("\nCancelled by user")
+    except Exception as e:
+        print(f"ERROR: Unexpected error: {type(e).__name__}: {e}")
         
 
 MODES = {

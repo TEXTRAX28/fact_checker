@@ -75,15 +75,21 @@ def _tavily_():
 
 def _chat(system: str, user: str, max_tokens: int = 1000) -> str:
     # Using DeepInfra (OpenAI-compatible)
-    response = _deepinfra_().chat.completions.create(
-        model=MODEL,
-        max_tokens=max_tokens,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    )
-    return response.choices[0].message.content or ""
+    try:
+        print(f"[DEBUG] API call to DeepInfra (model={MODEL}, max_tokens={max_tokens})...")
+        response = _deepinfra_().chat.completions.create(
+            model=MODEL,
+            max_tokens=max_tokens,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        print("[DEBUG] API response received")
+        return response.choices[0].message.content or ""
+    except Exception as e:
+        print(f"[CHAT ERROR] {type(e).__name__}: {e}")
+        raise
 
 # Groq chat function (archived - commented out)
 # def _chat_groq(system: str, user: str, max_tokens: int = 1000) -> str:
@@ -132,30 +138,61 @@ def _search(query: str) -> tuple[str, list[str]]:
 
 def fact_check(transcript: str) -> list[dict]:
     try:
-        # step 1: extract claims + search queries (1 LLM call)
-        raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=2500)
-        claims = [c for c in _parse_json_array(raw) if isinstance(c, dict) and c.get("claim")]
-        if not claims:
+        if not transcript or len(transcript.strip()) < 10:
+            print("ERROR: Text too short to analyze (minimum 10 characters)")
             return []
 
-        # step 2: search all claims in parallel (no LLM)
-        with __import__("concurrent.futures", fromlist=["ThreadPoolExecutor"]).ThreadPoolExecutor() as pool:
-            search_results = list(pool.map(lambda c: _search(c["query"]), claims))
+        # step 1: extract claims
+        try:
+            print("[DEBUG] Starting EXTRACT...")
+            raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=2500)
+            print(f"[DEBUG] EXTRACT response: {raw[:100]}...")
+            claims = [c for c in _parse_json_array(raw) if isinstance(c, dict) and c.get("claim")]
+            print(f"[DEBUG] Found {len(claims)} claims")
 
-        # step 3: verify all claims in one LLM call
-        context = ""
-        for item, (search_text, _) in zip(claims, search_results):
-            context += f"\n---\nSPEAKER: {item.get('speaker', 'UNKNOWN')}\nCLAIM: {item['claim']}\nSEARCH RESULTS:\n{search_text}\n"
+            if not claims:
+                print("No checkable claims found in text (contains only opinions, predictions, or vague statements)")
+                return []
+        except Exception as e:
+            print(f"ERROR during claim extraction: {type(e).__name__}: {e}")
+            return []
 
-        raw_verdicts = _chat(VERIFY_PROMPT, context, max_tokens=3500)
-        verdicts = [v for v in _parse_json_array(raw_verdicts) if isinstance(v, dict) and v.get("verdict")]
+        # step 2: search all claims in parallel
+        try:
+            print("[DEBUG] Searching for evidence...")
+            with __import__("concurrent.futures", fromlist=["ThreadPoolExecutor"]).ThreadPoolExecutor() as pool:
+                search_results = list(pool.map(lambda c: _search(c["query"]), claims))
+        except Exception as e:
+            print(f"ERROR during web search: {type(e).__name__}: {e}")
+            return []
 
-        # inject sources if model didn't include them
-        for verdict, (_, urls) in zip(verdicts, search_results):
-            if not verdict.get("sources"):
-                verdict["sources"] = urls[:3]
+        # step 3: verify claims
+        try:
+            print("[DEBUG] Verifying claims...")
+            context = ""
+            for item, (search_text, _) in zip(claims, search_results):
+                context += f"\n---\nSPEAKER: {item.get('speaker', 'UNKNOWN')}\nCLAIM: {item['claim']}\nSEARCH RESULTS:\n{search_text}\n"
 
-        return verdicts
+            raw_verdicts = _chat(VERIFY_PROMPT, context, max_tokens=3500)
+            verdicts = [v for v in _parse_json_array(raw_verdicts) if isinstance(v, dict) and v.get("verdict")]
+
+            if not verdicts:
+                print("WARNING: Verification returned no verdicts (confidence may be too low)")
+                return []
+
+            # inject sources if model didn't include them
+            for verdict, (_, urls) in zip(verdicts, search_results):
+                if not verdict.get("sources"):
+                    verdict["sources"] = urls[:3]
+
+            print(f"[DEBUG] Verification complete: {len(verdicts)} verified claims")
+            return verdicts
+        except Exception as e:
+            print(f"ERROR during claim verification: {type(e).__name__}: {e}")
+            return []
+
     except Exception as e:
-        print(f"[fact-check error] {e}")
+        print(f"ERROR: Unexpected error in fact_check: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
         return []
