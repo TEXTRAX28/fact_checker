@@ -85,6 +85,7 @@ def _capture_stream_chunk(stream_url: str, seconds: int = 30) -> str | None:
 
 def _stream_capture(url: str):
     from transcriber import transcribe_file
+    import difflib
     print("Resolving stream URL...")
     stream_url = _resolve_stream(url)
     if not stream_url:
@@ -93,6 +94,7 @@ def _stream_capture(url: str):
     print("Stream active. Capturing 30s chunks. Ctrl+C to stop.\n")
     fail_count = 0
     chunk_num = 0
+    last_transcript = ""
     while True:
         path = _capture_stream_chunk(stream_url)
         if not path:
@@ -106,6 +108,12 @@ def _stream_capture(url: str):
         result = transcribe_file(path)
         os.unlink(path)
         if result:
+            # Skip if transcript is >85% similar to last one (duplicate/repetitive content)
+            similarity = difflib.SequenceMatcher(None, result, last_transcript).ratio()
+            if similarity > 0.85:
+                continue
+            last_transcript = result
+
             # Replace [UNKNOWN] with speaker label based on chunk order
             speaker_label = f"SPEAKER_{chr(64 + chunk_num)}"  # A, B, C, D, etc.
             result = result.replace("[UNKNOWN]", f"[{speaker_label}]")
