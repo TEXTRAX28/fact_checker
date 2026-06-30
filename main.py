@@ -41,15 +41,7 @@ def fact_check_loop():
 # Feature #1: mic (coming soon)
 
 def run_mic():
-    print("Mode 1 (Microphone) — Coming Soon\n")
-    print("This feature is under development. Requires:")
-    print("  • faster-whisper (local transcription)")
-    print("  • pyannote.audio (speaker diarization)")
-    print("  • HUGGINGFACE_TOKEN environment variable\n")
-    print("For now, use:")
-    print("  • Mode 2: Live stream URLs")
-    print("  • Mode 3: Article URLs")
-    print("  • Mode 4: Paste text\n")
+    print("Mode 1 (Microphone) — Coming Soon")
 
 
 # Feature #2: URL video such as youtube etc
@@ -69,12 +61,10 @@ def _capture_stream_chunk(stream_url: str, seconds: int = 30) -> str | None:
 def _stream_capture(url: str):
     from transcriber import transcribe_file
     import difflib
-    print("Resolving stream URL...")
     stream_url = _resolve_stream(url)
     if not stream_url:
-        print("Could not resolve stream. Make sure yt-dlp and ffmpeg are installed.")
+        print("ERROR: Could not resolve stream")
         return
-    print("Stream active. Capturing 30s chunks. Ctrl+C to stop.\n")
     fail_count = 0
     chunk_num = 0
     last_transcript = ""

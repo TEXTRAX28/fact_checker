@@ -86,9 +86,7 @@ def _chat(system: str, user: str, max_tokens: int = 1000, model_type: str = None
         return _chat_deepinfra(system, user, max_tokens)
 
 def _chat_deepinfra(system: str, user: str, max_tokens: int = 1000) -> str:
-    # Using DeepInfra (OpenAI-compatible)
     try:
-        print(f"[DEBUG] API call to DeepInfra (model={MODEL}, max_tokens={max_tokens})...")
         response = _deepinfra_().chat.completions.create(
             model=MODEL,
             max_tokens=max_tokens,
@@ -97,10 +95,9 @@ def _chat_deepinfra(system: str, user: str, max_tokens: int = 1000) -> str:
                 {"role": "user", "content": user},
             ],
         )
-        print("[DEBUG] API response received")
         return response.choices[0].message.content or ""
     except Exception as e:
-        print(f"[CHAT ERROR] {type(e).__name__}: {e}")
+        print(f"[ERROR] DeepInfra: {type(e).__name__}: {e}")
         raise
 
 def _gemma_model_():
@@ -110,22 +107,12 @@ def _gemma_model_():
         import torch
 
         model_id = "google/gemma-4-E4B"
-        print("[DEBUG] Checking GPU...")
-        cuda_available = torch.cuda.is_available()
-        print(f"[DEBUG] CUDA available: {cuda_available}")
 
-        if not cuda_available:
-            print("[ERROR] CUDA not available. Gemma requires GPU. Install PyTorch CUDA:")
-            print("pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118")
-            raise RuntimeError("CUDA required for Gemma")
+        if not torch.cuda.is_available():
+            raise RuntimeError("[ERROR] CUDA not available. Gemma requires GPU.")
 
-        print("[DEBUG] Loading tokenizer...")
         _gemma_tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-        print("[DEBUG] Loading model (2-3 min, first run only)...")
-        print("[DEBUG] This may show warnings from HuggingFace, that's normal.\n")
-
-        # 4-bit quantization for efficient loading
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_use_double_quant=True,
@@ -138,12 +125,10 @@ def _gemma_model_():
             quantization_config=bnb_config,
             device_map="auto"
         )
-        print("[DEBUG] Gemma 4 E4B ready!\n")
     return _gemma_model, _gemma_tokenizer
 
 def _chat_gemma(system: str, user: str, max_tokens: int = 1000) -> str:
     try:
-        print("[DEBUG] Running local Gemma 4 12B inference...")
         import torch
         model, tokenizer = _gemma_model_()
 
@@ -157,12 +142,11 @@ def _chat_gemma(system: str, user: str, max_tokens: int = 1000) -> str:
         outputs = model.generate(inputs, max_new_tokens=max_tokens, temperature=0.7)
         response = tokenizer.decode(outputs[0])
 
-        print("[DEBUG] Gemma response received")
         if "[/INST]" in response:
             response = response.split("[/INST]")[-1].strip()
         return response
     except Exception as e:
-        print(f"[CHAT ERROR - Gemma] {type(e).__name__}: {e}")
+        print(f"[ERROR] Gemma: {type(e).__name__}: {e}")
         raise
 
 # Groq chat function (archived - commented out)
@@ -212,9 +196,8 @@ def _search(query: str) -> tuple[str, list[str]]:
 
 def compare_fact_check(transcript: str) -> dict:
     try:
-        print("\n[COMPARE MODE] Running both models...\n")
+        print("Comparing DeepInfra vs Gemma...\n")
         deepinfra_results = _fact_check_with_model(transcript, "deepinfra")
-        print("\n" + "="*60 + "\n")
         gemma_results = _fact_check_with_model(transcript, "gemma")
 
         return {
@@ -223,41 +206,31 @@ def compare_fact_check(transcript: str) -> dict:
             "transcript": transcript
         }
     except Exception as e:
-        print(f"[ERROR] Comparison failed: {type(e).__name__}: {e}")
+        print(f"[ERROR] {type(e).__name__}: {e}")
         return {}
 
 def _fact_check_with_model(transcript: str, model_type: str) -> list[dict]:
     try:
         if not transcript or len(transcript.strip()) < 10:
-            print("ERROR: Text too short to analyze (minimum 10 characters)")
             return []
 
-        # step 1: extract claims
         try:
-            print(f"[{model_type.upper()}] Extracting claims...")
             raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=2500, model_type=model_type)
             claims = [c for c in _parse_json_array(raw) if isinstance(c, dict) and c.get("claim")]
-            print(f"[{model_type.upper()}] Found {len(claims)} claims")
-
             if not claims:
-                print(f"[{model_type.upper()}] No checkable claims found")
                 return []
         except Exception as e:
-            print(f"[{model_type.upper()}] Extraction error: {type(e).__name__}: {e}")
+            print(f"[ERROR] {model_type}: {type(e).__name__}: {e}")
             return []
 
-        # step 2: search all claims
         try:
-            print(f"[{model_type.upper()}] Searching evidence...")
             with __import__("concurrent.futures", fromlist=["ThreadPoolExecutor"]).ThreadPoolExecutor() as pool:
                 search_results = list(pool.map(lambda c: _search(c["query"]), claims))
         except Exception as e:
-            print(f"[{model_type.upper()}] Search error: {type(e).__name__}: {e}")
+            print(f"[ERROR] {model_type}: {type(e).__name__}: {e}")
             return []
 
-        # step 3: verify claims
         try:
-            print(f"[{model_type.upper()}] Verifying claims...")
             context = ""
             for item, (search_text, _) in zip(claims, search_results):
                 context += f"\n---\nSPEAKER: {item.get('speaker', 'UNKNOWN')}\nCLAIM: {item['claim']}\nSEARCH RESULTS:\n{search_text}\n"
@@ -266,23 +239,20 @@ def _fact_check_with_model(transcript: str, model_type: str) -> list[dict]:
             verdicts = [v for v in _parse_json_array(raw_verdicts) if isinstance(v, dict) and v.get("verdict")]
 
             if not verdicts:
-                print(f"[{model_type.upper()}] No verdicts returned")
                 return []
 
-            # inject sources
             for verdict, (_, urls) in zip(verdicts, search_results):
                 if not verdict.get("sources"):
                     verdict["sources"] = urls[:3]
                 verdict["model"] = model_type.upper()
 
-            print(f"[{model_type.upper()}] Complete: {len(verdicts)} claims verified")
             return verdicts
         except Exception as e:
-            print(f"[{model_type.upper()}] Verification error: {type(e).__name__}: {e}")
+            print(f"[ERROR] {model_type}: {type(e).__name__}: {e}")
             return []
 
     except Exception as e:
-        print(f"[{model_type.upper()}] Unexpected error: {type(e).__name__}: {e}")
+        print(f"[ERROR] {type(e).__name__}: {e}")
         return []
 
 def fact_check(transcript: str) -> list[dict]:
@@ -296,36 +266,25 @@ def fact_check(transcript: str) -> list[dict]:
 
     try:
         if not transcript or len(transcript.strip()) < 10:
-            print("ERROR: Text too short to analyze (minimum 10 characters)")
             return []
 
-        # step 1: extract claims
         try:
-            print("[DEBUG] Starting EXTRACT...")
             raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=2500)
-            print(f"[DEBUG] EXTRACT response: {raw[:100]}...")
             claims = [c for c in _parse_json_array(raw) if isinstance(c, dict) and c.get("claim")]
-            print(f"[DEBUG] Found {len(claims)} claims")
-
             if not claims:
-                print("No checkable claims found in text (contains only opinions, predictions, or vague statements)")
                 return []
         except Exception as e:
-            print(f"ERROR during claim extraction: {type(e).__name__}: {e}")
+            print(f"[ERROR] Extraction: {type(e).__name__}: {e}")
             return []
 
-        # step 2: search all claims in parallel
         try:
-            print("[DEBUG] Searching for evidence...")
             with __import__("concurrent.futures", fromlist=["ThreadPoolExecutor"]).ThreadPoolExecutor() as pool:
                 search_results = list(pool.map(lambda c: _search(c["query"]), claims))
         except Exception as e:
-            print(f"ERROR during web search: {type(e).__name__}: {e}")
+            print(f"[ERROR] Search: {type(e).__name__}: {e}")
             return []
 
-        # step 3: verify claims
         try:
-            print("[DEBUG] Verifying claims...")
             context = ""
             for item, (search_text, _) in zip(claims, search_results):
                 context += f"\n---\nSPEAKER: {item.get('speaker', 'UNKNOWN')}\nCLAIM: {item['claim']}\nSEARCH RESULTS:\n{search_text}\n"
@@ -334,22 +293,17 @@ def fact_check(transcript: str) -> list[dict]:
             verdicts = [v for v in _parse_json_array(raw_verdicts) if isinstance(v, dict) and v.get("verdict")]
 
             if not verdicts:
-                print("WARNING: Verification returned no verdicts (confidence may be too low)")
                 return []
 
-            # inject sources if model didn't include them
             for verdict, (_, urls) in zip(verdicts, search_results):
                 if not verdict.get("sources"):
                     verdict["sources"] = urls[:3]
 
-            print(f"[DEBUG] Verification complete: {len(verdicts)} verified claims")
             return verdicts
         except Exception as e:
-            print(f"ERROR during claim verification: {type(e).__name__}: {e}")
+            print(f"[ERROR] Verification: {type(e).__name__}: {e}")
             return []
 
     except Exception as e:
-        print(f"ERROR: Unexpected error in fact_check: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"[ERROR] {type(e).__name__}: {e}")
         return []
