@@ -106,10 +106,10 @@ def _chat_deepinfra(system: str, user: str, max_tokens: int = 1000) -> str:
 def _gemma_model_():
     global _gemma_model, _gemma_tokenizer
     if _gemma_model is None:
-        from transformers import AutoTokenizer, AutoModelForCausalLM
+        from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
         import torch
 
-        model_id = "google/gemma-4-12b-it"
+        model_id = "google/gemma-4-E4B"
         print("[DEBUG] Checking GPU...")
         cuda_available = torch.cuda.is_available()
         print(f"[DEBUG] CUDA available: {cuda_available}")
@@ -122,14 +122,23 @@ def _gemma_model_():
         print("[DEBUG] Loading tokenizer...")
         _gemma_tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-        print("[DEBUG] Loading model (5-10 min, first run only)...")
+        print("[DEBUG] Loading model (2-3 min, first run only)...")
         print("[DEBUG] This may show warnings from HuggingFace, that's normal.\n")
+
+        # 4-bit quantization for efficient loading
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16
+        )
+
         _gemma_model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            torch_dtype=torch.float16,
+            quantization_config=bnb_config,
             device_map="auto"
         )
-        print("[DEBUG] Gemma 4 12B ready!\n")
+        print("[DEBUG] Gemma 4 E4B ready!\n")
     return _gemma_model, _gemma_tokenizer
 
 def _chat_gemma(system: str, user: str, max_tokens: int = 1000) -> str:
