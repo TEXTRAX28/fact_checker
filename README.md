@@ -1,4 +1,4 @@
-# Real-Time Fact Checker
+﻿# Real-Time Fact Checker
 
 ## Simple Overview
 
@@ -107,4 +107,4 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Choose a mode (1-4), provide input, and get instant verdicts with sources.
+Choose a mode (1-4), provide input, and get instant prediction with sources.
