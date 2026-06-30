@@ -204,7 +204,8 @@ def run_article():
         results = fact_check(text)
         if results:
             show_results(results)
-        # else: fact_check() already prints the reason
+        else:
+            print("No verifiable claims found.")
 
     except KeyboardInterrupt:
         print("\nCancelled by user")
@@ -215,7 +216,7 @@ def run_article():
 # Feature #4: Text
 def run_text():
     try:
-        print("Paste your text, then press Enter three times:")
+        print("Paste your text, then press Enter twice when done:")
         lines = []
         while True:
             line = input()
@@ -246,7 +247,8 @@ def run_text():
         results = fact_check(text)
         if results:
             show_results(results)
-        # else: fact_check() already prints the reason
+        else:
+            print("No verifiable claims found.")
 
     except KeyboardInterrupt:
         print("\nCancelled by user")
@@ -262,23 +264,8 @@ MODES = {
 }
 
 def main():
-    print("Real-Time Fact Checker\n")
-
-    # Model selection
-    print("Model:")
-    print("  1. DeepInfra Llama 3.3 70B (API)")
-    print("  2. Gemma 4 12B (local)")
-    print("  3. Compare both\n")
-    model_choice = input("Choose model [1-3] (default: 1): ").strip() or "1"
-
-    if model_choice == "3":
-        os.environ["ACTIVE_MODEL"] = "compare"
-    elif model_choice == "2":
-        os.environ["ACTIVE_MODEL"] = "gemma"
-    else:
-        os.environ["ACTIVE_MODEL"] = "deepinfra"
-
-    print(f"Model: {os.environ.get('ACTIVE_MODEL').upper()}\n")
+    print("Real-Time Fact Checker")
+    print("Model: Llama 3.3 70B (DeepInfra)\n")
 
     # Mode selection
     print("Input mode:")

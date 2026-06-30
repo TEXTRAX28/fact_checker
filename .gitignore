@@ -42,5 +42,9 @@ tempCodeRunnerFile.py
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
+
+# Project docs (local only - not for publishing)
 CLAUDE.md
 STATUS.md
+HANDOFF.md
+system_prompt.md
