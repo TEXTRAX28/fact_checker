@@ -1,4 +1,4 @@
-# DeepInfra (OpenAI-compatible client)
+# DeepInfra (openai client)
 openai>=1.0.0
 
 # Local Whisper transcription
