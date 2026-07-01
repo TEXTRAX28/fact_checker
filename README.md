@@ -28,7 +28,7 @@ The system is designed to work in real time. For live streams, it processes 30-s
 
 | Component | Technology | Purpose |
 |---|---|---|
-| **Language** | Python 3.x | Core application |
+| **Language** | Python 3.13.5 | Core application |
 | **LLM Model** | Llama 3.3 70B (via DeepInfra) | Claim extraction & verification |
 | **Web Search** | Tavily Search API | Find evidence for claims |
 | **Audio Transcription** | Local faster-whisper | Convert speech to text |
@@ -36,7 +36,7 @@ The system is designed to work in real time. For live streams, it processes 30-s
 | **Archive Access** | Wayback Machine API | Access archived page versions |
 | **Audio Capture** | sounddevice + numpy | Microphone input streaming |
 | **Parallel Processing** | ThreadPoolExecutor | Concurrent search operations |
-| **Output** | JSON + Terminal UI | Color-coded results display |
+| **Output** | JSON + Terminal UI | Color-coded results display with 6-tier verdict |
 
 **Services:**
 - **DeepInfra** = LLM inference (Llama 3.3 70B), OpenAI-compatible API
