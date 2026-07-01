@@ -57,7 +57,7 @@ def _deepinfra_():
         from openai import OpenAI
         _deepinfra_client = OpenAI(
             api_key=os.getenv("DEEPINFRA_API_KEY"),
-            base_url=`DEEPINFRA_BASE_URL
+            base_url=DEEPINFRA_BASE_URL
         )
     return _deepinfra_client
 
@@ -127,7 +127,7 @@ def _filter_sources(results: list[dict]) -> list[dict]:
     return (filtered or results)[:3]
 
 def _search(query: str) -> tuple[str, list[str]]:
-    # Pull extra results so filtering out social junk still leaves ~3 real sources.
+    # Pull extra results so filtering out social junk still leaves 3 sources.
     results = _filter_sources(_tavily_().search(query, max_results=6).get("results", []))
     urls = [r["url"] for r in results]
     text = "\n\n".join(f"[{r['url']}]\n{r['content'][:600]}" for r in results)

@@ -39,7 +39,6 @@ def fact_check_loop():
 
 
 # Feature #1: mic (coming soon)
-
 def run_mic():
     print("Mode 1 (Microphone) — Coming Soon")
 

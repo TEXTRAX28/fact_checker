@@ -89,14 +89,6 @@ The system is designed to work in real time. For live streams, it processes 30-s
 ---
 
 ## Setup
-
-Create a `.env` file in the project root:
-
-```
-DEEPINFRA_API_KEY=your_key_here
-TAVILY_API_KEY=your_key_here
-```
-
 Install dependencies:
 
 ```bash
