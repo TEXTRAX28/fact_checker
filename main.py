@@ -100,6 +100,13 @@ def run_stream():
 
 
 # Feature #3: URL
+MIN_PARAGRAPHS = 5
+
+def _usable(raw: str | None, minimum: int = MIN_PARAGRAPHS) -> bool:
+    # Gate on real content after cleaning, not raw length: a bot-blocked page can be
+    # 500+ chars of nav/menu junk that _clean_article strips down to almost nothing.
+    return bool(raw) and _clean_article(raw).count("[SPEAKER_A]") >= minimum
+
 def _fetch_article(url: str) -> tuple[str | None, str]:
     from urllib.request import urlopen, Request
     import json
@@ -114,14 +121,14 @@ def _fetch_article(url: str) -> tuple[str | None, str]:
             headers={"Accept": "text/plain", "User-Agent": "Mozilla/5.0"},
         )
         content = urlopen(req, timeout=15).read().decode("utf-8")
-        if len(content) >= 500:
+        if _usable(content):
             return content, ""
         warning = "[Warning] Could not fully read that page (paywalled, bot-blocked, or JS-rendered).\n"
     except Exception:
         pass
 
     # Tier 2: Wayback Machine
-    if not content or len(content) < 500:
+    if not _usable(content):
         try:
             req = Request(
                 f"https://archive.org/wayback/available?url={url}",
@@ -132,20 +139,20 @@ def _fetch_article(url: str) -> tuple[str | None, str]:
             if snapshot_url:
                 req = Request(snapshot_url, headers={"User-Agent": "Mozilla/5.0"})
                 content = urlopen(req, timeout=15).read().decode("utf-8")
-                if len(content) >= 500:
+                if _usable(content):
                     return content, warning + "  Fetched from Wayback Machine.\n" if warning else ""
         except Exception:
             pass
 
-    # Tier 3: Tavily search
-    if not content or len(content) < 500:
+    # Tier 3: Tavily search (last resort — accept any usable snippet, not full-article length)
+    if not _usable(content):
         try:
             from fact_checker import _tavily_
             domain = url.split("/")[2]
             results = _tavily_().search(f"site:{domain}", max_results=1)
             if results.get("results"):
                 content = results["results"][0]["content"]
-                if len(content) >= 500:
+                if _usable(content, minimum=1):
                     return content, warning + "  Fact-checking based on search coverage.\n" if warning else ""
         except Exception:
             pass
