@@ -201,11 +201,7 @@ def run_article():
             return
 
         print(f"Extracted {count} paragraphs. Fact-checking...\n")
-        results = fact_check(text)
-        if results:
-            show_results(results)
-        else:
-            print("No verifiable claims found.")
+        fact_check(text, on_result=lambda r: show_results([r]), verbose=True)
 
     except KeyboardInterrupt:
         print("\nCancelled by user")
@@ -244,11 +240,7 @@ def run_text():
             return
 
         print(f"\nExtracted {count} paragraphs. Fact-checking...\n")
-        results = fact_check(text)
-        if results:
-            show_results(results)
-        else:
-            print("No verifiable claims found.")
+        fact_check(text, on_result=lambda r: show_results([r]), verbose=True)
 
     except KeyboardInterrupt:
         print("\nCancelled by user")
