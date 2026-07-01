@@ -43,7 +43,7 @@ tempCodeRunnerFile.py
 .pytest_cache/
 .mypy_cache/
 
-# Project docs (local only - not for publishing)
+# Project docs 
 CLAUDE.md
 STATUS.md
 HANDOFF.md
