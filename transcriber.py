@@ -6,15 +6,6 @@ import numpy as np
 # Local Whisper (faster-whisper)
 _model = None
 
-# Groq client (archived - commented out)
-# from groq import Groq
-# _client = None
-# def _groq():
-#     global _client
-#     if _client is None:
-#         _client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-#     return _client
-
 SAMPLE_RATE = 16000
 
 def _whisper_model():
@@ -42,17 +33,6 @@ def _transcribe_path(path: str) -> str | None:
     except Exception as e:
         print(f"Whisper error: {e}")
         return None
-
-# Groq transcription (archived - commented out)
-# def _transcribe_path_groq(path: str) -> str | None:
-#     with open(path, "rb") as f:
-#         result = _groq().audio.transcriptions.create(
-#             file=("audio.wav", f),
-#             model="whisper-large-v3",
-#             response_format="text",
-#         )
-#     text = str(result).strip()
-#     return f"[UNKNOWN] {text}" if text else None
 
 def transcribe_chunk(audio: np.ndarray) -> str | None:
     path = _save_wav(audio)
