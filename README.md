@@ -108,5 +108,3 @@ python main.py
 ```
 
 Choose a mode (1-4), provide input, and get instant prediction with sources.
-
-# Testing something
