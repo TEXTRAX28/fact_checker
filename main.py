@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from fact_checker import fact_check
 from display import show_results
 
-load_dotenv() or load_dotenv(".env.example")
+load_dotenv() or load_dotenv(".env")
 
 SAMPLE_RATE = 16000
 CHUNK_SECONDS = 5

@@ -57,7 +57,7 @@ def _deepinfra_():
         from openai import OpenAI
         _deepinfra_client = OpenAI(
             api_key=os.getenv("DEEPINFRA_API_KEY"),
-            base_url=DEEPINFRA_BASE_URL
+            base_url=`DEEPINFRA_BASE_URL
         )
     return _deepinfra_client
 
