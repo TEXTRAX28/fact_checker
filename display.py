@@ -42,5 +42,6 @@ def show_results(results: list[dict]):
         if sources:
             print(f"  Sources ({len(sources)}):")
             for s in sources:
-                print(f"    - {_format_source(s)}")
-
+                print(f"    = {_format_source(s)}")
+                
+                

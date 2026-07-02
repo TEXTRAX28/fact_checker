@@ -10,7 +10,7 @@ _tavily = None
 MODEL = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
 DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
 
-EXTRACT_PROMPT = """Extract the 15 most specific and verifiable factual claims from the text.
+EXTRACT_PROMPT = """Extract up to 15 most specific and verifiable factual claims from the text.
 Return a JSON array. Each item must have:
   "claim": the exact claim as stated
   "query": a short search query that targets the underlying FACT, not just the names in the claim.
@@ -33,6 +33,11 @@ Each object in the array must have:
   "explanation": 1-3 sentences
   "sources": array of URLs from the search results
 
+Confidence guidelines:
+  95-100 = Two or more independent, high-quality sources (e.g. official government, academic, Reuters, AP, BBC) directly support or directly contradict the claim.
+  80-94 = At least one reliable source clearly supports or contradicts the claim, but independent confirmation is limited.
+  60-79 = Evidence is incomplete, indirect, outdated, or conflicting. The verdict is plausible but not strongly supported.
+  
 Verdict definitions (pick the most precise one — don't collapse everything to TRUE/FALSE):
   TRUE = fully supported by the sources
   MOSTLY TRUE = core claim is right but a detail is off or a minor nuance is missing
@@ -41,11 +46,11 @@ Verdict definitions (pick the most precise one — don't collapse everything to 
   UNVERIFIABLE = sources conflict, or none directly address the claim
   FALSE = directly contradicted by the sources
 
-If the claim is about a CURRENT or ONGOING state — vote counts, who currently holds an office,
-live negotiations, present-day support for a bill — and the sources do not contain recent, direct
+If the claim is about a CURRENT or ONGOING state do a vote counts, who currently holds an office,
+live negotiations, present-day support for a bill, and the sources do not contain recent, direct
 evidence for it, return UNVERIFIABLE. Do NOT infer a verdict from general or historical information.
 
-Omit any claim where confidence would be below 60.
+Remove any claim where confidence would be below 60.
 
 YOUR ENTIRE RESPONSE MUST BE A VALID JSON ARRAY STARTING WITH [ AND ENDING WITH ]. NOTHING ELSE."""
 
@@ -68,7 +73,7 @@ def _tavily_():
         _tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
     return _tavily
 
-def _chat(system: str, user: str, max_tokens: int = 1000) -> str:
+def _chat(system: str, user: str, max_tokens: int) -> str:
     try:
         response = _deepinfra_().chat.completions.create(
             model=MODEL,
@@ -99,8 +104,7 @@ def _parse_json_array(text: str) -> list:
         except json.JSONDecodeError:
             pass
 
-    # Fallback: pull complete objects straight from the text. Runs even when the
-    # array is truncated mid-output (no closing ]) — keeps every complete object.
+    # Fallback: pull complete objects straight from the text. Runs even when the array is truncated mid-output (no closing ]), keeps every complete object.
     objects = []
     for m in re.finditer(r"\{[^{}]*\}", text):
         try:
@@ -111,12 +115,10 @@ def _parse_json_array(text: str) -> list:
             continue
     return objects
 
-# User generated / social domains that system_prompt.md says never to use as a primary source. ponytail: substring blocklist; swap for a real source-tier map
-# if this gets gamed or you need per-domain trust weights.
 _LOW_QUALITY = (
     "facebook.com", "youtube.com", "youtu.be", "twitter.com", "x.com",
     "instagram.com", "tiktok.com", "reddit.com", "quora.com",
-    "pinterest.com", "threads.net", "medium.com",
+    "pinterest.com", "threads.net", "medium.com", 
 )
 
 def _filter_sources(results: list[dict]) -> list[dict]:
@@ -137,8 +139,8 @@ def _filter_sources(results: list[dict]) -> list[dict]:
         return results[:3]
 
 def _search(query: str) -> tuple[str, list[str]]:
-    # Pull extra results so filtering out social junk still leaves 3 sources.
-    results = _filter_sources(_tavily_().search(query, max_results=6).get("results", []))
+    # Pull extra results so filtering out UGC still leaves 3 sources.
+    results = _filter_sources(_tavily_().search(query, max_results=10).get("results", []))
 
     urls = []
     text_parts = []
@@ -235,7 +237,6 @@ def fact_check(transcript: str, on_result=None, verbose=False) -> list[dict]:
         print(f"[ERROR] {type(e).__name__}: {e}")
         return []
 
-
 if __name__ == "__main__":
     # Self-check: _parse_json_array must survive the malformed JSON the LLM actually emits.
     clean = '[{"claim":"a","verdict":"TRUE"},{"claim":"b","verdict":"FALSE"}]'
@@ -267,4 +268,5 @@ if __name__ == "__main__":
     assert _filter_sources(all_bad) == all_bad[:3], "keeps originals when all low-quality"
 
     print("OK: all self-checks pass")
+    
 

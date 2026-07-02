@@ -99,8 +99,7 @@ def _clean_article(raw: str) -> str:
     return "\n".join(labeled_lines)
 
 def _print_one_result(result: dict):
-    # Passed as fact_check's on_result callback so each verdict prints the
-    # moment it's ready, instead of waiting for the whole batch.
+    # Passed as fact_check's on_result callback so each verdict prints the moment it's ready, instead of waiting for the whole batch.
     show_results([result])
 
 def run_article():
@@ -206,9 +205,9 @@ def main():
         elif choice == "4":
             run_text()
         else:
-            print("Invalid choice.")
+            print(ValueError)
     except KeyboardInterrupt:
-        print("\nStopped.")
+        print("Stopped.")
 
 if __name__ == "__main__":
     main()
