@@ -15,7 +15,10 @@ def _bar(confidence: int) -> str:
     return f"[{'=' * filled}{'-' * (20 - filled)}] {confidence}%"
 
 def _format_source(url: str) -> str:
-    note = " [Note: Wikipedia, community-edited]" if "wikipedia.org" in url else ""
+    if "wikipedia.org" in url:
+        note = " [Note: Wikipedia, community-edited]"
+    else:
+        note = ""
     return f"{url}{note}"
 
 def show_results(results: list[dict]):
@@ -29,7 +32,13 @@ def show_results(results: list[dict]):
         print(f"  Why:    {explanation}")
 
         # support both "sources" (array) and legacy "source" (string)
-        sources = r.get("sources") or ([r["source"]] if r.get("source") else [])
+        sources = r.get("sources")
+        if not sources:
+            if r.get("source"):
+                sources = [r["source"]]
+            else:
+                sources = []
+
         if sources:
             print(f"  Sources ({len(sources)}):")
             for s in sources:

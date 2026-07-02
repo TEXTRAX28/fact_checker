@@ -1,17 +1,8 @@
 # DeepInfra (openai client)
 openai>=1.0.0
 
-# Local Whisper transcription
-faster-whisper>=0.10.0
-
 # Tavily web search
 tavily-python>=0.3.0
 
-# Audio processing
-sounddevice>=0.4.6
-numpy>=1.24.0
-
 # Utilities
 python-dotenv>=1.0.0
-yt-dlp>=2024.1.0
-

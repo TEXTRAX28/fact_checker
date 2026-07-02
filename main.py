@@ -1,41 +1,8 @@
-import os
-import queue
-import threading
-import subprocess
-import tempfile
-import concurrent.futures
 from dotenv import load_dotenv
 from fact_checker import fact_check
 from display import show_results
 
 load_dotenv() or load_dotenv(".env")
-
-SAMPLE_RATE = 16000
-CHUNK_SECONDS = 5
-SILENCE_THRESHOLD = 0.01 
-
-audio_queue: queue.Queue = queue.Queue()
-transcript_queue: queue.Queue[str] = queue.Queue()
-
-
-def fact_check_loop():
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-        futures: set = set()
-        while True:
-            try:
-                transcript = transcript_queue.get(timeout=0.1)
-                futures.add(pool.submit(fact_check, transcript))
-            except queue.Empty:
-                pass
-            done = {f for f in futures if f.done()}
-            for f in done:
-                try:
-                    results = f.result()
-                    if results:
-                        show_results(results)
-                except Exception as e:
-                    print(f"[error] {e}")
-            futures -= done
 
 
 # Feature #1: mic (coming soon)
@@ -43,67 +10,16 @@ def run_mic():
     print("Mode 1 (Microphone) — Coming Soon")
 
 
-# Feature #2: URL video such as youtube etc
-def _resolve_stream(url: str) -> str | None:
-    r = subprocess.run(["yt-dlp", "-g", "-f", "bestaudio", url], capture_output=True, text=True)
-    line = r.stdout.strip().split("\n")[0]
-    return line or None
-
-def _capture_stream_chunk(stream_url: str, seconds: int = 30) -> str | None:
-    out = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    r = subprocess.run([
-        "ffmpeg", "-y", "-i", stream_url,
-        "-t", str(seconds), "-ar", "16000", "-ac", "1", "-f", "wav", out.name,
-    ], capture_output=True)
-    return out.name if r.returncode == 0 else None
-
-def _stream_capture(url: str):
-    from transcriber import transcribe_file
-    import difflib
-    stream_url = _resolve_stream(url)
-    if not stream_url:
-        print("ERROR: Could not resolve stream")
-        return
-    fail_count = 0
-    chunk_num = 0
-    last_transcript = ""
-    while True:
-        path = _capture_stream_chunk(stream_url)
-        if not path:
-            fail_count += 1
-            if fail_count >= 3:  # Exit after 3 consecutive failures (stream ended)
-                print("\nStream ended.")
-                break
-            continue
-        fail_count = 0
-        chunk_num += 1
-        result = transcribe_file(path)
-        os.unlink(path)
-        if result:
-            # Skip if transcript is >85% similar to last one (duplicate/repetitive content)
-            similarity = difflib.SequenceMatcher(None, result, last_transcript).ratio()
-            if similarity > 0.85:
-                continue
-            last_transcript = result
-
-            # Replace [UNKNOWN] with speaker label based on chunk order
-            speaker_label = f"SPEAKER_{chr(64 + chunk_num)}"  # A, B, C, D, etc.
-            result = result.replace("[UNKNOWN]", f"[{speaker_label}]")
-            print(f"[transcript] {result}")
-            transcript_queue.put(result)
-
+# Feature #2: Live stream (coming soon)
 def run_stream():
-    url = input("Stream URL (YouTube live, BBC, etc.): ").strip()
-    threading.Thread(target=_stream_capture, args=(url,), daemon=True).start()
-    fact_check_loop()
+    print("Mode 2 (Live stream) — Coming Soon")
 
 
 # Feature #3: URL
 MIN_PARAGRAPHS = 5
 
 def _usable(raw: str | None, minimum: int = MIN_PARAGRAPHS) -> bool:
-    # Gate on real content after cleaning, not raw length: a bot-blocked page can be
-    # 500+ chars of nav/menu junk that _clean_article strips down to almost nothing.
+    # Gate on real content after cleaning, not raw length: a bot-blocked page can be 500+ chars of nav/menu junk that _clean_article strips down to almost nothing.
     return bool(raw) and _clean_article(raw).count("[SPEAKER_A]") >= minimum
 
 def _fetch_article(url: str) -> tuple[str | None, str]:
@@ -143,7 +59,7 @@ def _fetch_article(url: str) -> tuple[str | None, str]:
         except Exception:
             pass
 
-    # Tier 3: Tavily search (last resort — accept any usable snippet, not full-article length)
+    # Tier 3: Tavily search (last resort, accept any usable snippet, not full-article length)
     if not _usable(content):
         try:
             from fact_checker import _tavily_
@@ -165,13 +81,27 @@ def _clean_article(raw: str) -> str:
         raw = raw.split("Markdown Content:", 1)[1].strip()
     content = raw
     # strip markdown noise (multiline-safe for images that span lines)
-    content = re.sub(r"!\[[\s\S]*?\]\([^)]*\)", "", content)
-    content = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", content)
-    content = re.sub(r"https?://\S+", "", content)
-    content = re.sub(r"^#{1,6}\s+", "", content, flags=re.MULTILINE)
-    content = re.sub(r"\*{1,2}([^*]+)\*{1,2}", r"\1", content)
-    paragraphs = [p.strip() for p in content.split("\n\n") if len(p.strip()) > 40]
-    return "\n".join(f"[SPEAKER_A] {p}" for p in paragraphs[:25])
+    content = re.sub(r"!\[[\s\S]*?\]\([^)]*\)", "", content) # Images
+    content = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", content) # MD links but keep the content
+    content = re.sub(r"https?://\S+", "", content) # URL's
+    content = re.sub(r"^#{1,6}\s+", "", content, flags=re.MULTILINE) # Markdown
+    content = re.sub(r"\*{1,2}([^*]+)\*{1,2}", r"\1", content) # Bold and italic format
+    paragraphs = []
+    for p in content.split("\n\n"):
+        stripped = p.strip()
+        if len(stripped) > 40:
+            paragraphs.append(stripped)
+
+    labeled_lines = []
+    for p in paragraphs[:60]:  # Max of 60 paragraphs
+        labeled_lines.append(f"[SPEAKER_A] {p}")
+
+    return "\n".join(labeled_lines)
+
+def _print_one_result(result: dict):
+    # Passed as fact_check's on_result callback so each verdict prints the
+    # moment it's ready, instead of waiting for the whole batch.
+    show_results([result])
 
 def run_article():
     try:
@@ -207,7 +137,7 @@ def run_article():
             return
 
         print(f"Extracted {count} paragraphs. Fact-checking...\n")
-        fact_check(text, on_result=lambda r: show_results([r]), verbose=True)
+        fact_check(text, on_result=_print_one_result, verbose=True)
 
     except KeyboardInterrupt:
         print("\nCancelled by user")
@@ -246,7 +176,7 @@ def run_text():
             return
 
         print(f"\nExtracted {count} paragraphs. Fact-checking...\n")
-        fact_check(text, on_result=lambda r: show_results([r]), verbose=True)
+        fact_check(text, on_result=_print_one_result, verbose=True)
 
     except KeyboardInterrupt:
         print("\nCancelled by user")
@@ -254,28 +184,29 @@ def run_text():
         print(f"ERROR: Unexpected error: {type(e).__name__}: {e}")
         
 
-MODES = {
-    "1": ("Microphone (live)",              run_mic),
-    "2": ("Live stream URL (YouTube/news)", run_stream),
-    "3": ("Article URL",                    run_article),
-    "4": ("Paste text / paragraph",         run_text),
-}
-
 def main():
     print("Real-Time Fact Checker")
     print("Model: Llama 3.3 70B (DeepInfra)\n")
 
     # Mode selection
     print("Input mode:")
-    for k, (label, _) in MODES.items():
-        print(f"  {k}. {label}")
+    print("  1. Microphone (live)")
+    print("  2. Live stream URL (YouTube/news)")
+    print("  3. Article URL")
+    print("  4. Paste text / paragraph")
     choice = input("\n> ").strip()
-    _, fn = MODES.get(choice, (None, None))
-    if fn is None:
-        print("Invalid choice.")
-        return
+
     try:
-        fn()
+        if choice == "1":
+            run_mic()
+        elif choice == "2":
+            run_stream()
+        elif choice == "3":
+            run_article()
+        elif choice == "4":
+            run_text()
+        else:
+            print("Invalid choice.")
     except KeyboardInterrupt:
         print("\nStopped.")
 

@@ -10,7 +10,7 @@ _tavily = None
 MODEL = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
 DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
 
-EXTRACT_PROMPT = """Extract the 10 most specific and verifiable factual claims from the text.
+EXTRACT_PROMPT = """Extract the 15 most specific and verifiable factual claims from the text.
 Return a JSON array. Each item must have:
   "claim": the exact claim as stated
   "query": a short search query that targets the underlying FACT, not just the names in the claim.
@@ -85,11 +85,11 @@ def _chat(system: str, user: str, max_tokens: int = 1000) -> str:
 
 def _parse_json_array(text: str) -> list:
     text = re.sub(r"```(?:json)?\n?|```", "", text)
-    # quote bare enums; multi-word ones listed first so they win over the TRUE/FALSE substrings
+    # quote bare enums; multiple words ones listed first so they win over the TRUE/FALSE substrings
     text = re.sub(r':\s*(MOSTLY TRUE|PARTLY TRUE|MISLEADING|UNVERIFIABLE|TRUE|FALSE)\b', r': "\1"', text)
-    text = re.sub(r",\s*([}\]])", r"\1", text)  # drop trailing commas
+    text = re.sub(r",\s*([}\]])", r"\1", text)  # Remove trailing commas
 
-    # Clean full-array parse first.
+    # Clean full array parse first.
     match = re.search(r"\[[\s\S]*\]", text)
     if match:
         try:
@@ -111,8 +111,7 @@ def _parse_json_array(text: str) -> list:
             continue
     return objects
 
-# User-generated / social domains that system_prompt.md says never to use as a
-# primary source. ponytail: substring blocklist; swap for a real source-tier map
+# User generated / social domains that system_prompt.md says never to use as a primary source. ponytail: substring blocklist; swap for a real source-tier map
 # if this gets gamed or you need per-domain trust weights.
 _LOW_QUALITY = (
     "facebook.com", "youtube.com", "youtu.be", "twitter.com", "x.com",
@@ -121,26 +120,47 @@ _LOW_QUALITY = (
 )
 
 def _filter_sources(results: list[dict]) -> list[dict]:
-    # Drop social/UGC results, keep the top 3. If that leaves nothing, keep the
-    # originals — some evidence (with a low-confidence verdict) beats none.
-    filtered = [r for r in results if not any(d in r["url"] for d in _LOW_QUALITY)]
-    return (filtered or results)[:3]
+    # Drop social/UGC results, keep the top 3. If that leaves nothing, keep the originals with some evidence (with a low-confidence verdict) beats none.
+    filtered = []
+    for r in results:
+        keep = True
+        for domain in _LOW_QUALITY:
+            if domain in r["url"]:
+                keep = False
+                break
+        if keep:
+            filtered.append(r)
+
+    if filtered:
+        return filtered[:3]
+    else:
+        return results[:3]
 
 def _search(query: str) -> tuple[str, list[str]]:
     # Pull extra results so filtering out social junk still leaves 3 sources.
     results = _filter_sources(_tavily_().search(query, max_results=6).get("results", []))
-    urls = [r["url"] for r in results]
-    text = "\n\n".join(f"[{r['url']}]\n{r['content'][:600]}" for r in results)
+
+    urls = []
+    text_parts = []
+    for r in results:
+        urls.append(r["url"])
+        text_parts.append(f"[{r['url']}]\n{r['content'][:600]}")
+
+    text = "\n\n".join(text_parts)
     return text, urls
 
 def _verify_one(claim: dict, search_text: str, urls: list[str]) -> dict | None:
-    # One verify call per claim: keeps each verdict paired with its own search
-    # results (no positional zip drift) and lets callers reveal results as they land.
+    # One verify call per claim: keeps each verdict paired with its own search results (no positional zip drift) and lets callers reveal results as they land.
     context = (f"SPEAKER: {claim.get('speaker', 'UNKNOWN')}\n"
                f"CLAIM: {claim['claim']}\n"
                f"SEARCH RESULTS:\n{search_text}\n")
-    parsed = [v for v in _parse_json_array(_chat(VERIFY_PROMPT, context, max_tokens=600))
-              if isinstance(v, dict) and v.get("verdict")]
+    raw_reply = _chat(VERIFY_PROMPT, context, max_tokens=600)
+
+    parsed = []
+    for v in _parse_json_array(raw_reply):
+        if isinstance(v, dict) and v.get("verdict"):
+            parsed.append(v)
+
     if not parsed:
         return None
     verdict = parsed[0]
@@ -149,23 +169,26 @@ def _verify_one(claim: dict, search_text: str, urls: list[str]) -> dict | None:
     return verdict
 
 def fact_check(transcript: str, on_result=None, verbose=False) -> list[dict]:
-    # on_result(verdict) is called for each verdict as it's revealed, in claim
-    # order, so callers can print results one by one instead of waiting for all.
-    # verbose=True prints a stage-specific reason when nothing comes back, so the
-    # caller can tell "too short" from "no claims" from "couldn't verify any".
+    # on_result(verdict) is called for each verdict as it's revealed, in claim order, so callers can print results one by one instead of waiting for all.
+    # verbose=True prints a specific reason when nothing comes back, so the caller can tell "too short" from "no claims" from "couldn't verify any".
     def note(msg: str):
         if verbose:
             print(msg)
     try:
         if not transcript or len(transcript.strip()) < 10:
-            note("Input too short to fact-check — give it at least a full sentence.")
+            note("Input too short to fact-check, give more setences too fact-check")
             return []
 
         try:
-            raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=2500)
-            claims = [c for c in _parse_json_array(raw) if isinstance(c, dict) and c.get("claim")]
+            raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=4000)
+
+            claims = []
+            for c in _parse_json_array(raw):
+                if isinstance(c, dict) and c.get("claim"):
+                    claims.append(c)
+
             if not claims:
-                note("No checkable factual claims found — looks like opinion, prediction, or too vague.")
+                note("No checkable factual claims found, looks like opinion, prediction, or too vague.")
                 return []
         except Exception as e:
             print(f"[ERROR] Extraction: {type(e).__name__}: {e}")
@@ -173,20 +196,26 @@ def fact_check(transcript: str, on_result=None, verbose=False) -> list[dict]:
 
         try:
             with ThreadPoolExecutor() as pool:
-                search_results = list(pool.map(lambda c: _search(c["query"]), claims))
+                search_futures = []
+                for claim in claims:
+                    search_futures.append(pool.submit(_search, claim["query"]))
+
+                search_results = []
+                for f in search_futures:
+                    search_results.append(f.result())
         except Exception as e:
             print(f"[ERROR] Search: {type(e).__name__}: {e}")
             return []
 
-        # Verify each claim concurrently, but reveal in claim order: iterating the
-        # futures list front-to-back blocks on #1 first while #2.. finish in the
+        # Verify each claim concurrently, but reveal in claim order: iterating the futures list front-to-back blocks on #1 first while #2.. finish in the
         # background, so results appear in order as soon as each is ready.
         results: list[dict] = []
         with ThreadPoolExecutor() as pool:
-            futures = [
-                pool.submit(_verify_one, claim, search_text, urls)
-                for claim, (search_text, urls) in zip(claims, search_results)
-            ]
+            futures = []
+            for claim, search_result in zip(claims, search_results):
+                search_text, urls = search_result
+                futures.append(pool.submit(_verify_one, claim, search_text, urls))
+
             for f in futures:
                 try:
                     verdict = f.result()
@@ -199,7 +228,7 @@ def fact_check(transcript: str, on_result=None, verbose=False) -> list[dict]:
                         on_result(verdict)
         if not results:
             note(f"Extracted {len(claims)} claim(s), but none could be verified with enough "
-                 f"confidence — no source clearly confirmed or denied them (confidence < 60).")
+                 f"confidence, no source clearly confirmed or denied them (confidence < 60).")
         return results
 
     except Exception as e:
@@ -230,8 +259,10 @@ if __name__ == "__main__":
     # Source filter: drops social/UGC, keeps real sources, never returns empty.
     mixed = [{"url": "https://reuters.com/a"}, {"url": "https://facebook.com/b"},
              {"url": "https://bbc.com/c"}, {"url": "https://youtube.com/d"}]
-    assert [r["url"] for r in _filter_sources(mixed)] == \
-        ["https://reuters.com/a", "https://bbc.com/c"], "drops social, keeps real"
+    kept_urls = []
+    for r in _filter_sources(mixed):
+        kept_urls.append(r["url"])
+    assert kept_urls == ["https://reuters.com/a", "https://bbc.com/c"], "drops social, keeps real"
     all_bad = [{"url": "https://youtube.com/x"}, {"url": "https://x.com/y"}]
     assert _filter_sources(all_bad) == all_bad[:3], "keeps originals when all low-quality"
 

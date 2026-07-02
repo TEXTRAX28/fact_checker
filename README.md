@@ -40,7 +40,7 @@ The system is designed to work in real time. For live streams, it processes 30-s
 
 **Services:**
 - **DeepInfra** = LLM inference (Llama 3.3 70B), OpenAI-compatible API
-  - Roughly $0.30-0.50/month at light usage
+  - Roughly $3/month at light usage
 - **Tavily** = Web search API
   - Free tier: ~100 searches/month
   - Each query pulls up to 6 results; the top 3 non-social ones are kept, 600-char snippets
