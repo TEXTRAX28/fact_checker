@@ -2,9 +2,6 @@ import re
 
 COLORS = {
     "TRUE":         "\033[92m",  # bright green
-    "MOSTLY TRUE":  "\033[32m",  # green
-    "PARTLY TRUE":  "\033[33m",  # yellow
-    "MISLEADING":   "\033[93m",  # bright yellow
     "UNVERIFIABLE": "\033[90m",  # grey
     "FALSE":        "\033[91m",  # red
 }

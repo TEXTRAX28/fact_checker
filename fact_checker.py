@@ -28,7 +28,7 @@ VERIFY_PROMPT = """You are a fact-checker. Output ONLY a JSON array. No markdown
 Each object in the array must have:
   "speaker": the speaker label
   "claim": the original claim text
-  "verdict": one of TRUE / MOSTLY TRUE / PARTLY TRUE / MISLEADING / UNVERIFIABLE / FALSE
+  "verdict": one of TRUE / UNVERIFIABLE / FALSE
   "confidence": integer 60-100
   "explanation": 1-3 sentences
   "sources": array of URLs from the search results
@@ -38,13 +38,10 @@ Confidence guidelines:
   80-94 = At least one reliable source clearly supports or contradicts the claim, but independent confirmation is limited.
   60-79 = Evidence is incomplete, indirect, outdated, or conflicting. The verdict is plausible but not strongly supported.
   
-Verdict definitions (pick the most precise one — don't collapse everything to TRUE/FALSE):
-  TRUE = fully supported by the sources
-  MOSTLY TRUE = core claim is right but a detail is off or a minor nuance is missing
-  PARTLY TRUE = part is supported and part is wrong or unsupported
-  MISLEADING = technically true but framed deceptively, or missing context that changes its meaning
-  UNVERIFIABLE = sources conflict, or none directly address the claim
-  FALSE = directly contradicted by the sources
+Verdict definitions (pick the most precise one, don't collapse everything to TRUE/FALSE):
+  TRUE = The retrieved evidence directly supports the claim
+  FALSE = The retrieved evidence directly contradicts the claim
+  UNVERIFIABLE = The retrieved evidence is insufficient, irrelevant, conflicting or refute the claim. Do not infer or assume facts that are not explicitly supported by the evidence
 
 If the claim is about a CURRENT or ONGOING state do a vote counts, who currently holds an office,
 live negotiations, present-day support for a bill, and the sources do not contain recent, direct
@@ -91,7 +88,7 @@ def _chat(system: str, user: str, max_tokens: int) -> str:
 def _parse_json_array(text: str) -> list:
     text = re.sub(r"```(?:json)?\n?|```", "", text)
     # quote bare enums; multiple words ones listed first so they win over the TRUE/FALSE substrings
-    text = re.sub(r':\s*(MOSTLY TRUE|PARTLY TRUE|MISLEADING|UNVERIFIABLE|TRUE|FALSE)\b', r': "\1"', text)
+    text = re.sub(r':\s*(UNVERIFIABLE|TRUE|FALSE)\b', r': "\1"', text)
     text = re.sub(r",\s*([}\]])", r"\1", text)  # Remove trailing commas
 
     # Clean full array parse first.
@@ -250,8 +247,6 @@ if __name__ == "__main__":
     assert len(_parse_json_array(clean)) == 2, "clean"
     assert len(_parse_json_array(bare_enum)) == 1, "bare enum"
     assert _parse_json_array(bare_enum)[0]["verdict"] == "TRUE", "enum value"
-    bare_multi = '[{"claim":"a","verdict":MOSTLY TRUE,"confidence":80}]'      # multi-word unquoted enum
-    assert _parse_json_array(bare_multi)[0]["verdict"] == "MOSTLY TRUE", "multi-word enum"
     assert len(_parse_json_array(fenced)) == 1, "fenced"
     assert len(_parse_json_array(trailing)) == 1, "trailing comma"
     assert len(_parse_json_array(truncated)) == 2, "truncated keeps complete objects"
