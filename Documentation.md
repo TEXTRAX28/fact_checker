@@ -2,7 +2,7 @@
 
 ## Test #1
 
-When fact-checking claims, the system searches for evidence using Tavily, which returns only up to 6 results per claim. These results are then filtered to remove social/UGC domains (Facebook, YouTube, Reddit, etc.), keeping the top 3 "real" sources.
+When fact-checking claims, the system searches for evidence using Tavily, which returns only up to 10 results per claim. These results are then filtered to remove social/UGC domains (Facebook, YouTube, Reddit, etc.), keeping the top 3 "real" sources.
 
 **The issue:** Wikipedia tends to rank first in Tavily results. When it does, the current pipeline doesn't deduplicate sources, it just takes whatever comes back. This means a single Wikipedia article can appear multiple times in the sources list, filling up all 3 source slots with variants of the same link.
 
@@ -18,7 +18,7 @@ When fact-checking claims, the system searches for evidence using Tavily, which 
 
 ### 1. Expanded Search Coverage
 
-Increased Tavily's result fetch from 6 to 10 per claim. A broader initial pool provides better opportunities to surface authoritative sources before filtering, reducing reliance on any single dominant result (e.g., Wikipedia).
+Increased Tavily's result fetch from 10 per claim. A broader initial pool provides better opportunities to surface authoritative sources before filtering, reducing reliance on any single dominant result (e.g., Wikipedia).
 
 ### 2. Streamlined Verdict Scale
 

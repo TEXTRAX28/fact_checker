@@ -2,7 +2,7 @@
 
 ## Simple Overview
 
-A real-time fact-checking tool that listens to speech (microphone, live streams, articles, or text) and instantly verifies claims against web sources. Returns 6-tier verdicts (TRUE UNVERIFIABLE / FALSE) with confidence scores and source links, streamed one claim at a time.
+A real-time fact-checking tool that listens to speech (microphone, live streams, articles, or text) and instantly verifies claims against web sources. Returns 3-tier verdicts (TRUE UNVERIFIABLE / FALSE) with confidence scores and source links, streamed one claim at a time.
 
 **4 input modes:**
 - **Microphone** -> Live speech fact-checking
@@ -18,7 +18,7 @@ The Fact Checker is an intelligent verification system designed to combat misinf
 
 The system accepts information from different sources: article URLs and pasted text are working today. Live microphone input and live stream URLs are planned but currently just show a "Coming Soon" placeholder (Modes 1 and 2). Text is analyzed by the Llama 3.3 70B model (served via DeepInfra), which extracts the 15 most specific and fact-based claims, while ignoring opinions, predictions, or unclear statements.
 
-After the claims are extracted, the system searches the internet using Tavily's web search API to find reliable evidence. Multiple searches are performed at the same time to improve speed, and low-quality social/UGC sources (Facebook, YouTube, X, Reddit, etc.) are filtered out. The Llama 3.3 70B model then verifies **each claim in its own call** (run concurrently) and classifies it on a 6-tier scale: TRUE, UNVERIFIABLE, or FALSE. Results are revealed one by one, in claim order, as each verdict lands. Each result includes a confidence score (60-100%), a short explanation, and links to the supporting sources.
+After the claims are extracted, the system searches the internet using Tavily's web search API to find reliable evidence. Multiple searches are performed at the same time to improve speed, and low-quality social/UGC sources (Facebook, YouTube, X, Reddit, etc.) are filtered out. The Llama 3.3 70B model then verifies **each claim in its own call** (run concurrently) and classifies it on a 3-tier scale: TRUE, UNVERIFIABLE, or FALSE. Results are revealed one by one, in claim order, as each verdict lands. Each result includes a confidence score (60-100%), a short explanation, and links to the supporting sources.
 
 For website URLs, it uses a three-step fallback method: first trying Jina Reader to extract the article, then the Wayback Machine if the page cannot be accessed, and finally Tavily Search to gather evidence from other trusted sources. This allows the system to verify content even if an article is behind a paywall or blocks automated access. It can also verify multiple claims from a single input.
 
@@ -34,7 +34,7 @@ For website URLs, it uses a three-step fallback method: first trying Jina Reader
 | **Web Scraping** | Jina Reader API | Extract article text |
 | **Archive Access** | Wayback Machine API | Access archived page versions |
 | **Parallel Processing** | ThreadPoolExecutor | Concurrent search operations |
-| **Output** | JSON + Terminal UI | Color-coded results display with 6-tier verdict |
+| **Output** | JSON + Terminal UI | Color-coded results display with 3-tier verdict |
 
 Audio transcription (faster-whisper, sounddevice) was removed along with `transcriber.py`
 since Modes 1 and 2 are currently just placeholders. It can be added back when those
@@ -45,7 +45,7 @@ modes are actually built.
   - Roughly $3/month at light usage
 - **Tavily** = Web search API
   - Free tier: ~100 searches/month
-  - Each query pulls up to 6 results; the top 3 non-social ones are kept, 600-char snippets
+  - Each query pulls up to 10 results; the top 3 non-social ones are kept, 600-char snippets
 - **Jina Reader** = Article text extraction
   - No auth required, free tier available
 - **Wayback Machine** = Internet Archive snapshots
@@ -67,14 +67,14 @@ modes are actually built.
 - Filter out opinions, predictions, rhetorical questions
 
 ### Step 3: Verify
-- For each claim, search web via Tavily (600-char snippets; pulls 6, keeps top 3 non-social)
+- For each claim, search web via Tavily (600-char snippets; pulls 10, keeps top 3 non-social)
 - Verify each claim in its own Llama 70B call, run concurrently
 - Model assigns a 6-tier verdict: TRUE / UNVERIFIABLE / FALSE
 - Return confidence score (60-100%), explanation, and source URLs, streamed in claim order
 
 ### Smart Features
 - **Streaming results:** Each verdict prints the moment it's ready, in claim order, no waiting for the whole batch
-- **6-tier verdicts:** TRUE / UNVERIFIABLE / FALSE for more precise calls
+- **3-tier verdicts:** TRUE / UNVERIFIABLE / FALSE for more precise calls
 - **Live-state guard:** Claims about current/ongoing state (vote counts, current officeholder) with no recent, direct evidence return UNVERIFIABLE instead of a guess
 - **Source filtering:** Social/UGC domains (Facebook, YouTube, X, Reddit, TikTok, Medium) are dropped as primary sources
 - **Fallback chain:** If a page is thin or blocked, try archive then search, gated on real cleaned content, not byte count
