@@ -16,7 +16,7 @@ Return a JSON array. Each item must have:
   "query": a short search query that targets the underlying FACT, not just the names in the claim.
            e.g. for "X is president of Indonesia" use "current president of Indonesia" so the real
            answer is findable and the claim can be disproved if false.
-  "speaker": the name or label of who made the claim (e.g. "Senator Davis", "SPEAKER_A") — use "UNKNOWN" only if truly unidentifiable
+  "speaker": the name or label of who made the claim (e.g. "Senator Davis", "SPEAKER_A"), use "UNKNOWN" only if truly unidentifiable
 
 Only include: statistics, numbers, dates, named events, quotes, scientific/medical/legal/historical facts.
 Skip: opinions, predictions, vague statements, rhetorical questions.
@@ -37,15 +37,24 @@ Confidence guidelines:
   95-100 = Two or more independent, high-quality sources (e.g. official government, academic, Reuters, AP, BBC) directly support or directly contradict the claim.
   80-94 = At least one reliable source clearly supports or contradicts the claim, but independent confirmation is limited.
   60-79 = Evidence is incomplete, indirect, outdated, or conflicting. The verdict is plausible but not strongly supported.
-  
+
 Verdict definitions (pick the most precise one, don't collapse everything to TRUE/FALSE):
   TRUE = The retrieved evidence directly supports the claim
   FALSE = The retrieved evidence directly contradicts the claim
   UNVERIFIABLE = The retrieved evidence is insufficient, irrelevant, conflicting or refute the claim. Do not infer or assume facts that are not explicitly supported by the evidence
 
-If the claim is about a CURRENT or ONGOING state do a vote counts, who currently holds an office,
-live negotiations, present-day support for a bill, and the sources do not contain recent, direct
-evidence for it, return UNVERIFIABLE. Do NOT infer a verdict from general or historical information.
+COMPARATIVE AND SUPERLATIVE CLAIMS (CRITICAL):
+If the claim contains comparative or superlative phrases like "nearer than ever before", "best ever", "highest ever", "more than before", "closest ever", "farthest ever", "one of the largest", "unprecedented", it requires DIFFERENT evidence than general claims.
+
+For these claims:
+  - Do NOT accept general trend data (e.g., "improving" or "growing") as proof of "closer than ever"
+  - Require explicit historical comparison: minimum/maximum values, time-series data, or direct statements comparing current vs past
+  - If the sources show ONLY that the subject is improving but provide NO historical minimum/maximum or time-series comparison, mark FALSE (the claim requires evidence you don't have)
+  - If the sources provide clear historical data showing this IS the closest/best/highest point, mark TRUE
+
+Example: "Indonesia is nearer than ever before to ending poverty" + sources showing "progress in poverty reduction" = FALSE (progress is not the same as "closest ever"). Mark FALSE unless you find historical poverty rates proving current levels are lowest ever.
+
+If the claim is about a CURRENT or ONGOING state (who currently holds office, live negotiations, present-day support), and the sources do not contain recent, direct evidence, return UNVERIFIABLE. Do NOT infer a verdict from general or historical information.
 
 Remove any claim where confidence would be below 60.
 

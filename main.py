@@ -7,12 +7,12 @@ load_dotenv() or load_dotenv(".env")
 
 # Feature #1: mic (coming soon)
 def run_mic():
-    print("Mode 1 (Microphone) — Coming Soon")
+    print("Mode 1 (Microphone) - Coming Soon")
 
 
 # Feature #2: Live stream (coming soon)
 def run_stream():
-    print("Mode 2 (Live stream) — Coming Soon")
+    print("Mode 2 (Live stream) - Coming Soon")
 
 
 # Feature #3: URL
