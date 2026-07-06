@@ -143,21 +143,7 @@ _MEDIUM_QUALITY = (
 )
 
 def _filter_sources(results: list[dict]) -> list[dict]:
-    # Drop social/UGC results, keep the top 3. If that leaves nothing, keep the originals with some evidence (with a low-confidence verdict) beats none.
-    filtered = []
-    for r in results:
-        keep = True
-        for domain in _LOW_QUALITY:
-            if domain in r["url"]:
-                keep = False
-                break
-        if keep:
-            filtered.append(r)
-
-    if not filtered:
-        return results[:3]
-
-    # Official/high-quality domains move to the front, medium-quality (Wikipedia) moves to the back, Tavily's own relevance order is preserved within each of the three groups.
+    # Social/UGC domains are already excluded upstream via Tavily's exclude_domains param. Checks for the high and medium quality 
     def rank(r):
         for domain in _HIGH_QUALITY:
             if domain in r["url"]:
@@ -167,12 +153,12 @@ def _filter_sources(results: list[dict]) -> list[dict]:
                 return 2
         return 1
 
-    filtered.sort(key=rank)
-    return filtered[:3]
+    results.sort(key=rank)
+    return results[:3]
 
 def _search(query: str) -> tuple[str, list[str]]:
-    # Pull extra results so filtering out UGC still leaves 3 sources.
-    results = _filter_sources(_tavily_().search(query, max_results=10).get("results", []))
+    # Low-quality/UGC domains excluded at the Tavily API level, not filtered after the fact.
+    results = _filter_sources(_tavily_().search(query, max_results=10, exclude_domains=list(_LOW_QUALITY)).get("results", []))
 
     urls = []
     text_parts = []
@@ -287,15 +273,17 @@ if __name__ == "__main__":
     assert len(_parse_json_array(truncated)) == 2, "truncated keeps complete objects"
     assert _parse_json_array("not json at all") == [], "garbage"
 
-    # Source filter: drops social/UGC, keeps real sources, never returns empty.
-    mixed = [{"url": "https://reuters.com/a"}, {"url": "https://facebook.com/b"},
-             {"url": "https://bbc.com/c"}, {"url": "https://youtube.com/d"}]
-    kept_urls = []
-    for r in _filter_sources(mixed):
-        kept_urls.append(r["url"])
-    assert kept_urls == ["https://reuters.com/a", "https://bbc.com/c"], "drops social, keeps real"
-    all_bad = [{"url": "https://youtube.com/x"}, {"url": "https://x.com/y"}]
-    assert _filter_sources(all_bad) == all_bad[:3], "keeps originals when all low-quality"
+    # Source ranking: high-quality first, medium-quality (Wikipedia) last, everything
+    # else keeps its original (Tavily-given) relative order in between.
+    mixed = [{"url": "https://en.wikipedia.org/a"}, {"url": "https://some-blog.com/b"},
+             {"url": "https://reuters.com/c"}, {"url": "https://other-blog.com/d"}]
+    ranked = _filter_sources(mixed)
+    ranked_urls = []
+    for r in ranked:
+        ranked_urls.append(r["url"])
+    assert ranked_urls == ["https://reuters.com/c", "https://some-blog.com/b",
+                           "https://other-blog.com/d"], "high-quality first, wikipedia last, order preserved within tiers"
+    assert len(ranked) <= 3, "caps at 3 sources"
 
     print("OK: all self-checks pass")
     
