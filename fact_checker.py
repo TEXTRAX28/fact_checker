@@ -137,13 +137,13 @@ _HIGH_QUALITY = (
     "sciencedirect.com", "nytimes.com",
 )
 
-# Not blocked (it's real, citable content), but just deranked so it doesn't get in the top priority
+# Not blocked, but just deranked so it doesn't get in the top priority
 _MEDIUM_QUALITY = (
     "wikipedia.org",
 )
 
 def _filter_sources(results: list[dict]) -> list[dict]:
-    # Social/UGC domains are already excluded upstream via Tavily's exclude_domains param. Checks for the high and medium quality 
+    # Social/UGC domains are already excluded upstream via Tavily's exclude_domains. Checks for the high and medium quality 
     def rank(r):
         for domain in _HIGH_QUALITY:
             if domain in r["url"]:
@@ -157,7 +157,7 @@ def _filter_sources(results: list[dict]) -> list[dict]:
     return results[:3]
 
 def _search(query: str) -> tuple[str, list[str]]:
-    # Low-quality/UGC domains excluded at the Tavily API level, not filtered after the fact.
+    # Low-quality/UGC domains excluded at the Tavily, not filtered after the fact check.
     results = _filter_sources(_tavily_().search(query, max_results=10, exclude_domains=list(_LOW_QUALITY)).get("results", []))
 
     urls = []
