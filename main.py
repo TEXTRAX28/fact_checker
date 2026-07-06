@@ -205,7 +205,7 @@ def main():
         elif choice == "4":
             run_text()
         else:
-            print(ValueError)
+            print("ERROR: Invalid choice, pick 1-4")
     except KeyboardInterrupt:
         print("Stopped.")
 
