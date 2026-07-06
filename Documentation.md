@@ -1,6 +1,6 @@
 # Wikipedia Over-Representation, Work in Progress
 
-## The Problem
+## Test #1
 
 When fact-checking claims, the system searches for evidence using Tavily, which returns only up to 6 results per claim. These results are then filtered to remove social/UGC domains (Facebook, YouTube, Reddit, etc.), keeping the top 3 "real" sources.
 
@@ -88,3 +88,91 @@ The compressed scale forces clearer reasoning. For example:
 This test validates that the 3-tier verdict scale and expanded search coverage produce more defensible and more source grounded 
   
 
+## Test #2
+I have this text as a test to test TRUE FALSE or UNVERIFIABLE and is the wikipedia problem fixed?
+```
+Artificial intelligence has become one of the fastest-growing technologies in history. ChatGPT was publicly released by OpenAI in November 2022 and reached one million users in about five days. Since then, many governments and universities have begun developing policies for the responsible use of generative AI. In March 2023, Italy temporarily banned ChatGPT over privacy concerns before later restoring access. The European Union approved the AI Act in 2024, making it the world's first comprehensive AI regulation. Some experts argue that AI will eventually replace many office jobs, while others believe it will primarily augment human workers rather than replace them. OpenAI has stated that GPT-4 performs better than GPT-3.5 on many standardized benchmarks, although benchmark scores do not necessarily translate directly into real-world performance. Today, more people use generative AI than ever before, and AI adoption is increasing across industries including healthcare, education, finance, and software engineering.
+```
+### Output:
+```
+(.venv) PS C:\Users\natan\VSC Code\fact-checker> python main.py
+Real-Time Fact Checker
+Model: Llama 3.3 70B (DeepInfra)
+
+Input mode:
+  1. Microphone (live)
+  2. Live stream URL (YouTube/news)
+  3. Article URL
+  4. Paste text / paragraph
+
+> 4
+Paste your text, then press Enter twice when done:
+Artificial intelligence has become one of the fastest-growing technologies in history. ChatGPT was publicly released by OpenAI in November 2022 and reached one million users in about five days. Since then, many governments and universities have begun developing policies for the responsible use of generative AI. In March 2023, Italy temporarily banned ChatGPT over privacy concerns before later restoring access. The European Union approved the AI Act in 2024, making it the world's first comprehensive AI regulation. Some experts argue that AI will eventually replace many office jobs, while others believe it will primarily augment human workers rather than replace them. OpenAI has stated that GPT-4 performs better than GPT-3.5 on many standardized benchmarks, although benchmark scores do not necessarily translate directly into real-world performance. Today, more people use generative AI than ever before, and AI adoption is increasing across industries including healthcare, education, finance, and software engineering.
+
+
+
+Extracted 1 paragraphs. Fact-checking...
+
+
+[TRUE]  SPEAKER_A
+  Claim:  ChatGPT was publicly released by OpenAI in November 2022
+  Conf:   [===================-] 95%
+  Why:    Two independent sources, including a historical website and Wikipedia, confirm that ChatGPT was released to the public by OpenAI in November 2022. The exact date of release is specified as November 30, 2022, by one of the sources.
+  Sources (2):
+    = https://www.history.com/this-day-in-history/november-30/chatgpt-released-openai
+    = https://en.wikipedia.org/wiki/ChatGPT [Note: Wikipedia, community-edited]
+
+[UNVERIFIABLE]  SPEAKER_A
+  Claim:  ChatGPT reached one million users in about five days
+  Conf:   [============--------] 60%
+  Why:    The search results do not provide direct evidence of the time it took for ChatGPT to reach one million users. The sources provide information on ChatGPT's current user base, growth, and market share, but do not include historical data on the initial user acquisition rate.
+  Sources (3):
+    = https://www.demandsage.com/chatgpt-statistics
+    = https://explodingtopics.com/blog/chatgpt-users
+    = https://fatjoe.com/blog/chatgpt-stats
+
+[TRUE]  SPEAKER_A
+  Claim:  Italy temporarily banned ChatGPT over privacy concerns in March 2023
+  Conf:   [===================-] 95%
+  Why:    The Italian watchdog cited concerns about ChatGPT's data collection and processing, and imposed a temporary limitation on the processing of Italian users' data. The ban was later lifted after the owners of ChatGPT addressed data privacy concerns.
+  Sources (3):
+    = https://source.washu.edu/2023/09/a-cautionary-tale-how-italys-chatgpt-ban-hurt-businesses-economy
+    = https://www.theguardian.com/technology/2023/mar/31/italy-privacy-watchdog-bans-chatgpt-over-data-breach-concerns
+    = https://www.dw.com/en/ai-italy-lifts-ban-on-chatgpt-after-data-privacy-improvements/a-65469742
+
+[TRUE]  SPEAKER_A
+  Claim:  The European Union approved the AI Act in 2024
+  Conf:   [===================-] 95%
+  Why:    The European Union's Artificial Intelligence Act was published in the Official Journal of the European Union on 12 July 2024 and entered into force on 1 August 2024. The sources confirm the AI Act's approval and implementation timeline.
+  Sources (3):
+    = https://ai-act-service-desk.ec.europa.eu/en/ai-act/timeline/timeline-implementation-eu-ai-act
+    = https://www.kennedyslaw.com/en/thought-leadership/article/2026/the-eu-ai-act-implementation-timeline-understanding-the-next-deadline-for-compliance
+    = https://www.goodwinlaw.com/en/insights/publications/2024/10/insights-technology-aiml-eu-ai-act-implementation-timeline
+
+[TRUE]  SPEAKER_A
+  Claim:  OpenAI has stated that GPT-4 performs better than GPT-3.5 on many standardized benchmarks
+  Conf:   [===================-] 95%
+  Why:    Multiple sources, including Synthedia and Coursera, confirm that OpenAI has announced GPT-4 outperforms GPT-3.5 in many evaluations, with improvements in accuracy, safety, and functionality. Datastudios also reports a significant leap in language understanding and multimodal intelligence.
+  Sources (3):
+    = https://synthedia.substack.com/p/gpt-4-is-better-than-gpt-35-here
+    = https://www.coursera.org/articles/chat-gpt-3-vs-4
+    = https://www.datastudios.org/post/chatgpt-4o-vs-gpt-3-5-full-comparison-and-report
+```
+
+### The Problem This Test Was Checking
+
+Test #1 fixed Wikipedia over-representation on the Nadiem Makarim article, but that was one article, one topic. Test #2 uses a completely different topic (AI/ChatGPT/regulation, a domain where Wikipedia articles are dense and well-maintained, exactly the condition that caused the original 12-instance problem) to check whether the fix holds outside the article it was tuned on, or whether it was a fix that only worked by coincidence on that one input.
+
+### Wikipedia Fix: Confirmed Fixed
+
+Across all 5 verdicts and 13 total source slots in this output, `wikipedia.org` appears **exactly once**, in claim 1's sources list:
+
+```
+Sources (2):
+    = https://www.history.com/this-day-in-history/november-30/chatgpt-released-openai
+    = https://en.wikipedia.org/wiki/ChatGPT [Note: Wikipedia, community-edited]
+```
+
+That single instance is also the good case, not the bad one, it sits alongside a non-Wikipedia source rather than filling every source slot the way it did before the fix, and it carries the `[Note: Wikipedia, community-edited]`. No verdict in this test has 2 or 3 Wikipedia links crowding out other sources, which was the actual failure mode Test #1 was written to fix.
+
+This confirms the VERIFY_PROMPT source-prioritization fix generalizes: it wasn't a one-off result tied to the Nadiem Makarim article, it holds on a different topic domain where Wikipedia coverage is just as strong.

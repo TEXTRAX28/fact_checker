@@ -16,6 +16,10 @@ Return a JSON array. Each item must have:
   "query": a short search query that targets the underlying FACT, not just the names in the claim.
            e.g. for "X is president of Indonesia" use "current president of Indonesia" so the real
            answer is findable and the claim can be disproved if false.
+           Include the specific named person, company, or organization tied to the claim so the
+           query surfaces primary/official sources instead of generic aggregator or stats sites.
+           e.g. for "ChatGPT reached one million users in five days" use
+           "OpenAI Sam Altman ChatGPT one million users five days", not just "ChatGPT million users".
   "speaker": the name or label of who made the claim (e.g. "Senator Davis", "SPEAKER_A"), use "UNKNOWN" only if truly unidentifiable
 
 Only include: statistics, numbers, dates, named events, quotes, scientific/medical/legal/historical facts.
@@ -124,7 +128,18 @@ def _parse_json_array(text: str) -> list:
 _LOW_QUALITY = (
     "facebook.com", "youtube.com", "youtu.be", "twitter.com", "x.com",
     "instagram.com", "tiktok.com", "reddit.com", "quora.com",
-    "pinterest.com", "threads.net", "medium.com", 
+    "pinterest.com", "threads.net", "medium.com",
+)
+
+_HIGH_QUALITY = (
+    "reuters.com", "apnews.com", "bbc.com", "bbc.co.uk", ".gov", ".go.id",
+    "who.int", "worldbank.org", "un.org", "imf.org", "nature.com",
+    "sciencedirect.com", "nytimes.com",
+)
+
+# Not blocked (it's real, citable content), but just deranked so it doesn't get in the top priority
+_MEDIUM_QUALITY = (
+    "wikipedia.org",
 )
 
 def _filter_sources(results: list[dict]) -> list[dict]:
@@ -139,10 +154,21 @@ def _filter_sources(results: list[dict]) -> list[dict]:
         if keep:
             filtered.append(r)
 
-    if filtered:
-        return filtered[:3]
-    else:
+    if not filtered:
         return results[:3]
+
+    # Official/high-quality domains move to the front, medium-quality (Wikipedia) moves to the back, Tavily's own relevance order is preserved within each of the three groups.
+    def rank(r):
+        for domain in _HIGH_QUALITY:
+            if domain in r["url"]:
+                return 0
+        for domain in _MEDIUM_QUALITY:
+            if domain in r["url"]:
+                return 2
+        return 1
+
+    filtered.sort(key=rank)
+    return filtered[:3]
 
 def _search(query: str) -> tuple[str, list[str]]:
     # Pull extra results so filtering out UGC still leaves 3 sources.

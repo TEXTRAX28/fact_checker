@@ -43,11 +43,14 @@ tempCodeRunnerFile.py
 .pytest_cache/
 .mypy_cache/
 
-# Project docs 
+# Project docs
 CLAUDE.md
 STATUS.md
 HANDOFF.md
 system_prompt.md
 NOTES.md
 ARCHITECTURE.md
+
+# graphify output (generated, regenerate with /graphify)
+graphify-out/
 
