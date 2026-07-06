@@ -2,7 +2,7 @@ from dotenv import load_dotenv
 from fact_checker import fact_check
 from display import show_results
 
-load_dotenv() or load_dotenv(".env")
+load_dotenv()
 
 
 # Feature #1: mic (coming soon)
@@ -24,6 +24,7 @@ def _usable(raw: str | None, minimum: int = MIN_PARAGRAPHS) -> bool:
 
 def _fetch_article(url: str) -> tuple[str | None, str]:
     from urllib.request import urlopen, Request
+    from urllib.parse import urlparse
     import json
 
     warning = ""
@@ -55,7 +56,7 @@ def _fetch_article(url: str) -> tuple[str | None, str]:
                 req = Request(snapshot_url, headers={"User-Agent": "Mozilla/5.0"})
                 content = urlopen(req, timeout=15).read().decode("utf-8")
                 if _usable(content):
-                    return content, warning + "  Fetched from Wayback Machine.\n" if warning else ""
+                    return content, warning + "Fetched from Wayback Machine.\n"
         except Exception:
             pass
 
@@ -63,12 +64,13 @@ def _fetch_article(url: str) -> tuple[str | None, str]:
     if not _usable(content):
         try:
             from fact_checker import _tavily_
-            domain = url.split("/")[2]
+            normalized_url = url if "://" in url else f"https://{url}"
+            domain = urlparse(normalized_url).netloc
             results = _tavily_().search(f"site:{domain}", max_results=1)
             if results.get("results"):
                 content = results["results"][0]["content"]
                 if _usable(content, minimum=1):
-                    return content, warning + "  Fact-checking based on search coverage.\n" if warning else ""
+                    return content, f"{warning}Fetched from Tavily.\n"
         except Exception:
             pass
 
