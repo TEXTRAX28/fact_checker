@@ -45,7 +45,7 @@ modes are actually built.
   - Roughly $3/month at light usage
 - **Tavily** = Web search API
   - Free tier: ~100 searches/month
-  - Each query pulls up to 10 results; the top 3 non-social ones are kept, 600-char snippets
+  - Each query pulls up to 10 results with social/UGC domains excluded server-side; the top 3 are kept after ranking (official sources first, Wikipedia last), 600-char snippets
 - **Jina Reader** = Article text extraction
   - No auth required, free tier available
 - **Wayback Machine** = Internet Archive snapshots
@@ -67,16 +67,19 @@ modes are actually built.
 - Filter out opinions, predictions, rhetorical questions
 
 ### Step 3: Verify
-- For each claim, search web via Tavily (600-char snippets; pulls 10, keeps top 3 non-social)
+- For each claim, search web via Tavily (600-char snippets; pulls 10, social/UGC excluded server-side, keeps top 3 after ranking)
 - Verify each claim in its own Llama 70B call, run concurrently
-- Model assigns a 6-tier verdict: TRUE / UNVERIFIABLE / FALSE
+- Model assigns a 3-tier verdict: TRUE / UNVERIFIABLE / FALSE
 - Return confidence score (60-100%), explanation, and source URLs, streamed in claim order
 
 ### Smart Features
 - **Streaming results:** Each verdict prints the moment it's ready, in claim order, no waiting for the whole batch
 - **3-tier verdicts:** TRUE / UNVERIFIABLE / FALSE for more precise calls
 - **Live-state guard:** Claims about current/ongoing state (vote counts, current officeholder) with no recent, direct evidence return UNVERIFIABLE instead of a guess
-- **Source filtering:** Social/UGC domains (Facebook, YouTube, X, Reddit, TikTok, Medium) are dropped as primary sources
+- **Comparative-claim guard:** Superlative claims ("nearer than ever," "best ever") require explicit historical evidence, not just general trend data
+- **Source filtering:** Social/UGC domains (Facebook, YouTube, X, Reddit, TikTok, Medium) are excluded at the Tavily API level via `exclude_domains`, not filtered after the fact
+- **Source ranking:** Official/high-quality domains (Reuters, AP, BBC, .gov, WHO, World Bank, UN, IMF, Nature, etc.) are prioritized first; Wikipedia is demoted last but still used as a fallback if nothing else is available
+- **Entity-aware search queries:** Claim extraction includes the specific named person/company/organization in the search query so primary sources surface over generic aggregator sites
 - **Fallback chain:** If a page is thin or blocked, try archive then search, gated on real cleaned content, not byte count
 - **Parallel search + verify:** Claims are searched and verified concurrently for speed
 - **Robust JSON parsing:** Recovers verdicts even when the model returns malformed or truncated JSON (incl. multi-word bare enums)

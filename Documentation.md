@@ -18,7 +18,7 @@ When fact-checking claims, the system searches for evidence using Tavily, which 
 
 ### 1. Expanded Search Coverage
 
-Increased Tavily's result fetch from 10 per claim. A broader initial pool provides better opportunities to surface authoritative sources before filtering, reducing reliance on any single dominant result (e.g., Wikipedia).
+Increased Tavily's result fetch from 6 to 10 per claim. A broader initial pool provides better opportunities to surface authoritative sources before filtering, reducing reliance on any single dominant result (e.g., Wikipedia).
 
 ### 2. Streamlined Verdict Scale
 
@@ -176,3 +176,26 @@ Sources (2):
 That single instance is also the good case, not the bad one, it sits alongside a non-Wikipedia source rather than filling every source slot the way it did before the fix, and it carries the `[Note: Wikipedia, community-edited]`. No verdict in this test has 2 or 3 Wikipedia links crowding out other sources, which was the actual failure mode Test #1 was written to fix.
 
 This confirms the VERIFY_PROMPT source-prioritization fix generalizes: it wasn't a one-off result tied to the Nadiem Makarim article, it holds on a different topic domain where Wikipedia coverage is just as strong.
+
+---
+
+## Update (Jul 7): Filtering and Ranking Moved to Code
+
+Tests #1 and #2 above validated the fix at the **prompt level** (VERIFY_PROMPT
+telling the model to deprioritize Wikipedia). Since then, the same intent was
+also implemented at the **code level**, so the behavior no longer depends on
+the model consistently following that instruction:
+
+- Social/UGC domains (Facebook, YouTube, Reddit, etc.) are now excluded via
+  Tavily's own `exclude_domains` parameter, before results even come back,
+  not filtered out in Python after the fact.
+- `_filter_sources()` now explicitly sorts results into three tiers:
+  official/high-quality domains first (`_HIGH_QUALITY`: Reuters, AP, BBC,
+  .gov, WHO, World Bank, UN, IMF, Nature, ScienceDirect, NYT), Wikipedia
+  demoted last (`_MEDIUM_QUALITY`), everything else in between.
+
+The prompt-level fix documented above and the code-level fix are
+complementary, not conflicting: the prompt guides the model's own source
+selection, the code guarantees the ranking regardless of what the model does.
+See `md/STATUS.md` Known Issue 2 and `md/ARCHITECTURE.md` for the current
+implementation.

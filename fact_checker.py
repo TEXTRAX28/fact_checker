@@ -100,7 +100,7 @@ def _chat(system: str, user: str, max_tokens: int) -> str:
 
 def _parse_json_array(text: str) -> list:
     text = re.sub(r"```(?:json)?\n?|```", "", text)
-    # quote bare enums; multiple words ones listed first so they win over the TRUE/FALSE substrings
+    # quote bare enums (e.g. "verdict": TRUE -> "verdict": "TRUE")
     text = re.sub(r':\s*(UNVERIFIABLE|TRUE|FALSE)\b', r': "\1"', text)
     text = re.sub(r",\s*([}\]])", r"\1", text)  # Remove trailing commas
 
