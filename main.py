@@ -14,8 +14,6 @@ def run_mic():
 def run_stream():
     print("Mode 2 (Live stream) - Coming Soon")
 
-
-# Feature #3: URL
 MIN_PARAGRAPHS = 5
 
 def _usable(raw: str | None, minimum: int = MIN_PARAGRAPHS) -> bool:
@@ -31,6 +29,7 @@ def _fetch_article(url: str) -> tuple[str | None, str]:
     content = None
 
     # Tier 1: Jina reader
+    print("Trying Jina Reader...")
     try:
         req = Request(
             f"https://r.jina.ai/{url}",
@@ -45,6 +44,7 @@ def _fetch_article(url: str) -> tuple[str | None, str]:
 
     # Tier 2: Wayback Machine
     if not _usable(content):
+        print("Jina Reader unavailable, trying Wayback Machine...")
         try:
             req = Request(
                 f"https://archive.org/wayback/available?url={url}",
@@ -62,6 +62,7 @@ def _fetch_article(url: str) -> tuple[str | None, str]:
 
     # Tier 3: Tavily search (last resort, accept any usable snippet, not full-article length)
     if not _usable(content):
+        print("Wayback Machine unavailable, trying Tavily search...")
         try:
             from fact_checker import _tavily_
             normalized_url = url if "://" in url else f"https://{url}"
@@ -104,6 +105,7 @@ def _print_one_result(result: dict):
     # Passed as fact_check's on_result callback so each verdict prints the moment it's ready, instead of waiting for the whole batch.
     show_results([result])
 
+# Feature #3: URL
 def run_article():
     try:
         url = input("Article URL: ").strip()

@@ -1,7 +1,36 @@
-﻿import json
+import json
 import os
 import re
+import sys
+import threading
+import time
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
+
+@contextmanager
+def _loading(message: str):
+    # Prints "message." / "message.." / "message..." on a loop, overwriting the same
+    # line, so a slow API call doesn't look like a frozen terminal. Always stops the
+    # spinner in `finally`, even if the wrapped call raises.
+    stop = threading.Event()
+
+    def spin():
+        dots = 0
+        while not stop.is_set():
+            sys.stdout.write(f"\r{message}{'.' * (dots % 4):<3}")
+            sys.stdout.flush()
+            dots += 1
+            time.sleep(0.4)
+        sys.stdout.write("\r" + " " * (len(message) + 3) + "\r")
+        sys.stdout.flush()
+
+    thread = threading.Thread(target=spin, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join()
 
 # DeepInfra API (OpenAI-compatible)
 _deepinfra_client = None
@@ -200,7 +229,8 @@ def fact_check(transcript: str, on_result=None, verbose=False) -> list[dict]:
             return []
 
         try:
-            raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=4000)
+            with _loading("Extracting claims (Llama 3.3 70B via DeepInfra)"):
+                raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=4000)
 
             claims = []
             for c in _parse_json_array(raw):
@@ -215,20 +245,23 @@ def fact_check(transcript: str, on_result=None, verbose=False) -> list[dict]:
             return []
 
         try:
-            with ThreadPoolExecutor() as pool:
-                search_futures = []
-                for claim in claims:
-                    search_futures.append(pool.submit(_search, claim["query"]))
+            print(f"Found {len(claims)} claim(s).")
+            with _loading("Searching Tavily for evidence"):
+                with ThreadPoolExecutor() as pool:
+                    search_futures = []
+                    for claim in claims:
+                        search_futures.append(pool.submit(_search, claim["query"]))
 
-                search_results = []
-                for f in search_futures:
-                    search_results.append(f.result())
+                    search_results = []
+                    for f in search_futures:
+                        search_results.append(f.result())
         except Exception as e:
             print(f"[ERROR] Search: {type(e).__name__}: {e}")
             return []
 
         # Verify each claim concurrently, but reveal in claim order: iterating the futures list front-to-back blocks on #1 first while #2.. finish in the
         # background, so results appear in order as soon as each is ready.
+        print(f"Verifying {len(claims)} claim(s) (Llama 3.3 70B via DeepInfra)...\n")
         results: list[dict] = []
         with ThreadPoolExecutor() as pool:
             futures = []

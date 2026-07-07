@@ -28,13 +28,7 @@ def show_results(results: list[dict]):
         explanation = re.sub(r'https?://\S+', '', r.get('explanation', '')).strip()
         print(f"  Why:    {explanation}")
 
-        # support both "sources" (array) and legacy "source" (string)
-        sources = r.get("sources")
-        if not sources:
-            if r.get("source"):
-                sources = [r["source"]]
-            else:
-                sources = []
+        sources = r.get("sources", [])
 
         if sources:
             print(f"  Sources ({len(sources)}):")

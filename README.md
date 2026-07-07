@@ -86,6 +86,127 @@ modes are actually built.
 
 ---
 
+## Code Flow
+
+Call chain for Mode 3 (Article URL) and Mode 4 (Paste text), the two working modes:
+
+```
+main()
+ |-- "3" --> run_article() --> _fetch_article() --> _clean_article() --> fact_check()
+ `-- "4" --> run_text()     -------------------->    _clean_article() --> fact_check()
+
+fact_check()
+ |-- 1. EXTRACT   _chat()  -->  _parse_json_array()
+ |-- 2. SEARCH    _search()  -->  _filter_sources()        (parallel, once per claim)
+ |-- 3. VERIFY    _verify_one()  -->  _chat()  -->  _parse_json_array()   (parallel, once per claim)
+ `-- 4. DISPLAY   on_result() --> _print_one_result() --> show_results()
+```
+
+
+Steps 2 and 3 run concurrently across all claims (`ThreadPoolExecutor`), but step 4 still
+reveals results one at a time, in the original claim order, as each one finishes.
+
+### Functions
+
+**main.py**
+
+| Function | Role |
+|---|---|
+| `main()` | Prints the menu, dispatches to the chosen mode |
+| `run_mic()` | Mode 1:Microphones, IRL fact checker - Coming Soon|
+| `run_stream()` | Mode 2: Live Stream, Youtube, etc - Coming Soon |
+| `run_article()` | Mode 3: fetch, clean, and fact-check an article URL |
+| `run_text()` | Mode 4: clean and fact-check pasted text |
+| `_fetch_article()` | 3-tier fetch: Jina Reader -> Wayback Machine -> Tavily search |
+| `_usable()` | Gate: does the fetched content have >= 5 real paragraphs after cleaning? |
+| `_clean_article()` | Strips markdown noise, splits text into `[SPEAKER_A]`-labeled paragraphs |
+| `_print_one_result()` | Wraps one verdict in a list and hands it to `show_results()` |
+
+**fact_checker.py**
+
+| Function | Role |
+|---|---|
+| `fact_check()` | Extract -> search -> verify, streams results via `on_result` |
+| `_chat()` | Sends one message to the LLM (DeepInfra) and returns its reply |
+| `_deepinfra_()` | Lazy singleton client for the LLM |
+| `_tavily_()` | Lazy singleton client for Tavily search |
+| `_parse_json_array()` | Recovers a clean JSON array from imperfect model output |
+| `_search()` | Runs one Tavily search for a claim's query |
+| `_filter_sources()` | Ranks results: official sources first, Wikipedia last |
+| `_verify_one()` | Verifies a single claim against its own search results |
+
+**display.py**
+
+| Function | Role |
+|---|---|
+| `show_results()` | Prints verdict, confidence bar, explanation, and sources |
+| `_bar()` | Renders the confidence percentage as a text bar |
+| `_format_source()` | Appends a Wikipedia caveat note to a source URL, if applicable |
+
+### Worked example: one claim, start to finish
+
+Input text (Mode 4, pasted): `"ChatGPT was publicly released by OpenAI in November 2022."`
+
+1. **`_clean_article()`** turns it into `"[SPEAKER_A] ChatGPT was publicly released by OpenAI in November 2022."`
+2. **EXTRACT** - `_chat(EXTRACT_PROMPT, ...)` returns:
+   ```json
+   [{"claim": "ChatGPT was publicly released by OpenAI in November 2022",
+     "query": "OpenAI ChatGPT public release November 2022",
+     "speaker": "SPEAKER_A"}]
+   ```
+3. **SEARCH** - `_search("OpenAI ChatGPT public release November 2022")` calls Tavily (UGC domains already excluded), then `_filter_sources()` ranks the results - a Reuters/history.com-type source moves ahead of Wikipedia - and returns the top 3 as one text block plus their URLs.
+4. **VERIFY** - `_verify_one()` sends the claim + that text block to `_chat(VERIFY_PROMPT, ...)`, which returns:
+   ```json
+   [{"speaker": "SPEAKER_A",
+     "claim": "ChatGPT was publicly released by OpenAI in November 2022",
+     "verdict": "TRUE", "confidence": 95,
+     "explanation": "Two independent sources confirm the November 2022 public release.",
+     "sources": ["https://www.history.com/...", "https://en.wikipedia.org/wiki/ChatGPT"]}]
+   ```
+5. **DISPLAY** - `on_result` fires immediately, `_print_one_result()` wraps it in a list and calls `show_results()`, which prints:
+   ```
+   [TRUE]  SPEAKER_A
+     Claim:  ChatGPT was publicly released by OpenAI in November 2022
+     Conf:   [===================-] 95%
+     Why:    Two independent sources confirm the November 2022 public release.
+     Sources (2):
+       = https://www.history.com/...
+       = https://en.wikipedia.org/wiki/ChatGPT [Note: Wikipedia, community-edited]
+   ```
+
+If the input had 15 claims instead of 1, steps 2-4 would run for all 15 concurrently (via `ThreadPoolExecutor`), but step 5 still prints them one at a time, in the original claim order, as each one finishes - not all-at-once at the end.
+
+---
+
+## Bug Fixes
+
+Three correctness issues found and fixed in `main.py`:
+
+1. **Invalid menu choice printed the wrong thing.** `main()`'s `else` branch used
+   to do `print(ValueError)`, which prints the literal text `<class 'ValueError'>`
+   instead of a real message. Now prints `"ERROR: Invalid choice, pick 1-4"`.
+
+2. **Lost source provenance in `_fetch_article()`.** The Wayback Machine and
+   Tavily fallback tiers only appended their "Fetched from ..." note when an
+   earlier warning was already set, due to operator precedence in
+   `warning + "note" if warning else ""` (parses as `(warning + "note") if
+   warning else ""`). Since `warning` is only set when Jina returns unusable
+   content, not when Jina throws an exception, a Jina timeout followed by a
+   successful Wayback/Tavily fetch used to silently drop the provenance note -
+   the user had no way to know the content came from an archive or a search
+   snippet rather than the live page. Now the note is always appended,
+   regardless of `warning`'s prior state.
+
+3. **`url.split("/")[2]` assumed the URL had a scheme.** The Tavily fallback
+   tier extracted the domain this way, which throws `IndexError` on a
+   schemeless URL (`example.com/path` instead of `https://example.com/path`),
+   silently swallowed by the tier's broad `except Exception`. `run_article()`
+   never validates the URL before passing it through, so a user pasting a bare
+   domain would trigger this. Fixed by normalizing a missing scheme and using
+   `urllib.parse.urlparse(...).netloc` instead.
+
+---
+
 ## Setup
 Install dependencies:
 
