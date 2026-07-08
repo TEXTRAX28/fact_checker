@@ -269,11 +269,13 @@ def fact_check(transcript: str, on_result=None, verbose=False) -> list[dict]:
                 search_text, urls = search_result
                 futures.append(pool.submit(_verify_one, claim, search_text, urls))
 
+            error_count = 0
             for f in futures:
                 try:
                     verdict = f.result()
                 except Exception as e:
                     print(f"[ERROR] Verification: {type(e).__name__}: {e}")
+                    error_count += 1
                     continue
                 if verdict:
                     results.append(verdict)
@@ -282,6 +284,10 @@ def fact_check(transcript: str, on_result=None, verbose=False) -> list[dict]:
         if not results:
             note(f"Extracted {len(claims)} claim(s), but none could be verified with enough "
                  f"confidence, no source clearly confirmed or denied them (confidence < 60).")
+        else:
+            low_confidence_dropped = len(claims) - len(results) - error_count
+            if low_confidence_dropped > 0:
+                note(f"{low_confidence_dropped} claim(s) dropped (confidence < 60).")
         return results
 
     except Exception as e:

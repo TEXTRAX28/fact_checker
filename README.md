@@ -81,7 +81,7 @@ modes are actually built.
 - **Source ranking:** Official/high-quality domains (Reuters, AP, BBC, .gov, WHO, World Bank, UN, IMF, Nature, etc.) are prioritized first; Wikipedia is demoted last but still used as a fallback if nothing else is available
 - **Entity-aware search queries:** Claim extraction includes the specific named person/company/organization in the search query so primary sources surface over generic aggregator sites
 - **Fallback chain:** If a page is thin or blocked, try archive then search, gated on real cleaned content, not byte count
-- **Parallel search + verify:** Claims are searched and verified concurrently for speed
+- **Parallel within each phase:** All claims are searched concurrently, then all claims are verified concurrently, for speed
 - **Robust JSON parsing:** Recovers verdicts even when the model returns malformed or truncated JSON (incl. multi-word bare enums)
 
 ---
@@ -103,8 +103,9 @@ fact_check()
 ```
 
 
-Steps 2 and 3 run concurrently across all claims (`ThreadPoolExecutor`), but step 4 still
-reveals results one at a time, in the original claim order, as each one finishes.
+Step 2 runs concurrently across all claims, then step 3 runs concurrently across all claims
+(`ThreadPoolExecutor` each time); step 4 still reveals results one at a time, in the original
+claim order, as each one finishes.
 
 ### Functions
 

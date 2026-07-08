@@ -197,5 +197,45 @@ the model consistently following that instruction:
 The prompt-level fix documented above and the code-level fix are
 complementary, not conflicting: the prompt guides the model's own source
 selection, the code guarantees the ranking regardless of what the model does.
-See `md/STATUS.md` Known Issue 2 and `md/ARCHITECTURE.md` for the current
-implementation.
+
+---
+
+## Update (Jul 8): Verdict Consistency Across Runs
+
+Same claim set (Indonesian corruption case, Chromebook procurement, Gojek
+user numbers) run repeatedly over several days, comparing earlier outputs
+against the latest run.
+
+| Claim | Earlier outputs | Latest output | Consistency |
+|---|---|---|---|
+| 10-year prison sentence | TRUE | TRUE | Excellent |
+| 809B rupiah restitution | TRUE | TRUE | Excellent |
+| 1B rupiah fine | TRUE | TRUE | Excellent |
+| Chromebook procurement | TRUE | TRUE | Excellent |
+| Met Google in 2020 | Mostly TRUE | TRUE | Stable |
+| $125m state losses | FALSE | FALSE | Stable |
+| Gojek >170M users | UNVERIFIABLE -> FALSE -> TRUE | TRUE | Improved after better retrieval |
+| 190-day additional jail | TRUE -> UNVERIFIABLE -> FALSE | FALSE | Improved |
+| Additional 5 years if restitution unpaid | FALSE -> TRUE | TRUE | Better evidence found |
+| Minister until 2024 | FALSE most runs | FALSE | Consistent verdict, explanation can still improve |
+| 2018 Chromebook internet finding | UNVERIFIABLE | UNVERIFIABLE | Consistent |
+| Benefited from 809B transactions | FALSE -> UNVERIFIABLE -> TRUE -> UNVERIFIABLE | UNVERIFIABLE | Still unstable |
+
+Most claims (9 of 12) now land on the same verdict run after run. The
+remaining 3 that shifted mostly settled toward a more defensible verdict as
+retrieval improved, not toward noise. The one exception is "benefited from
+809B transactions," which has flipped between all three verdict tiers across
+different runs and should be treated as unresolved rather than trusted at
+face value.
+
+### Source Quality Also Improved
+
+A few days ago, typical evidence for these claims included LinkedIn,
+Threads, random blogs, and Medium articles. In the latest runs, the typical
+evidence set looks like BBC, Reuters, CNBC, ABC/AP, and the New York Times.
+
+This lines up with the domain ranking and query changes documented above
+(`_filter_sources()` tiering, entity-aware search queries): better queries
+surface primary reporting instead of aggregator or UGC content, and the
+tiering keeps that reporting ranked above Wikipedia and blogs once it's
+found.
