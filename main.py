@@ -33,7 +33,12 @@ def _fetch_article(url: str) -> tuple[str | None, str]:
     try:
         req = Request(
             f"https://r.jina.ai/{url}",
-            headers={"Accept": "text/plain", "User-Agent": "Mozilla/5.0"},
+            headers={
+                "Accept": "text/plain",
+                "User-Agent": "Mozilla/5.0",
+                "X-Remove-Selector": "nav, footer, header, aside",
+                "X-Retain-Images": "none",
+            },
         )
         content = urlopen(req, timeout=15).read().decode("utf-8")
         if _usable(content):

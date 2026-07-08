@@ -53,6 +53,12 @@ Return a JSON array. Each item must have:
 
 Only include: statistics, numbers, dates, named events, quotes, scientific/medical/legal/historical facts.
 Skip: opinions, predictions, vague statements, rhetorical questions.
+
+If two or more figures are stated as complementary parts of one whole (a percentage split, a
+budget breakdown, a ratio that sums to a total), extract them as ONE claim describing the full
+breakdown, not one claim per figure. e.g. for "60% from nilai manfaat, 40% from Bipih" extract
+a single claim "the scheme is 60% nilai manfaat and 40% Bipih", not two separate claims. Splitting
+them risks one being verified TRUE and the other FALSE even though they're the same fact.
 Return [] if nothing is checkable.
 Return ONLY the JSON array, no other text."""
 
@@ -61,9 +67,22 @@ VERIFY_PROMPT = """You are a fact-checker. Output ONLY a JSON array. No markdown
 Each object in the array must have:
   "speaker": the speaker label
   "claim": the original claim text
-  "verdict": one of TRUE / UNVERIFIABLE / FALSE
+  "supported": true ONLY if the evidence explicitly and directly confirms the claim. False otherwise,
+               including when the evidence is simply silent or missing, silence is not support.
+  "contradicted": true ONLY if the evidence explicitly and directly contradicts the claim (states a
+                   different number, denies the event, etc.), OR the claim is comparative/superlative
+                   and fails the historical-comparison test below. False if the evidence is merely
+                   silent, absent, or doesn't mention the claim at all, absence is not contradiction.
+  "verdict": one of TRUE / UNVERIFIABLE / FALSE, this field is informational only and will be
+             recomputed from "supported"/"contradicted" downstream, but fill it in consistently:
+             supported=true & contradicted=false -> TRUE
+             contradicted=true & supported=false -> FALSE
+             anything else (neither, or both) -> UNVERIFIABLE
   "confidence": integer 60-100
-  "explanation": 1-3 sentences
+  "explanation": 1-3 sentences, written in the SAME language as the claim text (e.g. claim in
+                 Indonesian -> explanation in Indonesian, claim in English -> explanation in
+                 English). Never mix languages within one explanation, regardless of what
+                 language the search results/sources are in.
   "sources": array of URLs from the search results
 
 Confidence guidelines:
@@ -71,10 +90,9 @@ Confidence guidelines:
   80-94 = At least one reliable source clearly supports or contradicts the claim, but independent confirmation is limited.
   60-79 = Evidence is incomplete, indirect, outdated, or conflicting. The verdict is plausible but not strongly supported.
 
-Verdict definitions (pick the most precise one, don't collapse everything to TRUE/FALSE):
-  TRUE = The retrieved evidence directly supports the claim
-  FALSE = The retrieved evidence directly contradicts the claim
-  UNVERIFIABLE = The retrieved evidence is insufficient, irrelevant, conflicting or refute the claim. Do not infer or assume facts that are not explicitly supported by the evidence
+The most common mistake is treating "I found no evidence either way" as FALSE. It is not, that is
+UNVERIFIABLE. Only mark FALSE when the evidence actively says something different from the claim,
+never because the evidence is merely absent or thin.
 
 COMPARATIVE AND SUPERLATIVE CLAIMS (CRITICAL):
 If the claim contains comparative or superlative phrases like "nearer than ever before", "best ever", "highest ever", "more than before", "closest ever", "farthest ever", "one of the largest", "unprecedented", it requires DIFFERENT evidence than general claims.
@@ -82,12 +100,12 @@ If the claim contains comparative or superlative phrases like "nearer than ever 
 For these claims:
   - Do NOT accept general trend data (e.g., "improving" or "growing") as proof of "closer than ever"
   - Require explicit historical comparison: minimum/maximum values, time-series data, or direct statements comparing current vs past
-  - If the sources show ONLY that the subject is improving but provide NO historical minimum/maximum or time-series comparison, mark FALSE (the claim requires evidence you don't have)
-  - If the sources provide clear historical data showing this IS the closest/best/highest point, mark TRUE
+  - If the sources show ONLY that the subject is improving but provide NO historical minimum/maximum or time-series comparison, set contradicted=true (the claim requires evidence you don't have, this is the one case where "no proof" counts as a contradiction, because a superlative claim's burden of proof is the historical comparison itself)
+  - If the sources provide clear historical data showing this IS the closest/best/highest point, set supported=true
 
-Example: "Indonesia is nearer than ever before to ending poverty" + sources showing "progress in poverty reduction" = FALSE (progress is not the same as "closest ever"). Mark FALSE unless you find historical poverty rates proving current levels are lowest ever.
+Example: "Indonesia is nearer than ever before to ending poverty" + sources showing "progress in poverty reduction" = contradicted=true (progress is not the same as "closest ever"). Only set supported=true if you find historical poverty rates proving current levels are lowest ever.
 
-If the claim is about a CURRENT or ONGOING state (who currently holds office, live negotiations, present-day support), and the sources do not contain recent, direct evidence, return UNVERIFIABLE. Do NOT infer a verdict from general or historical information.
+If the claim is about a CURRENT or ONGOING state (who currently holds office, live negotiations, present-day support), and the sources do not contain recent, direct evidence, leave both supported and contradicted false (UNVERIFIABLE). Do NOT infer a verdict from general or historical information.
 
 Remove any claim where confidence would be below 60.
 
@@ -171,6 +189,10 @@ _MEDIUM_QUALITY = (
     "wikipedia.org",
 )
 
+# Tavily's own relevance score per result, 0-1. Below this, results tend to be
+# off-topic or thin (song lyrics, wrong-year pages) rather than just low-quality domains.
+_MIN_SCORE = 0.3
+
 def _filter_sources(results: list[dict]) -> list[dict]:
     # Social/UGC domains are already excluded upstream via Tavily's exclude_domains. Checks for the high and medium quality 
     def rank(r):
@@ -187,7 +209,16 @@ def _filter_sources(results: list[dict]) -> list[dict]:
 
 def _search(query: str) -> tuple[str, list[str]]:
     # Low-quality/UGC domains excluded at the Tavily, not filtered after the fact check.
-    results = _filter_sources(_tavily_().search(query, max_results=10, exclude_domains=list(_LOW_QUALITY)).get("results", []))
+    raw_results = _tavily_().search(query, max_results=10, exclude_domains=list(_LOW_QUALITY), search_depth="advanced").get("results", [])
+
+    results = []
+    for r in raw_results:
+        if r.get("score", 0) < _MIN_SCORE:
+            print(f"[filtered low-relevance] score={r.get('score', 0):.2f} {r.get('url', '')}")
+            continue
+        results.append(r)
+
+    results = _filter_sources(results)
 
     urls = []
     text_parts = []
@@ -215,6 +246,19 @@ def _verify_one(claim: dict, search_text: str, urls: list[str]) -> dict | None:
     verdict = parsed[0]
     if not verdict.get("sources"):
         verdict["sources"] = urls[:3]
+
+    # Deterministic verdict: derived from supported/contradicted rather than trusting the
+    # model's own "verdict" field, closes the "no evidence found -> FALSE" failure mode
+    # at the code level instead of just asking the model not to do it.
+    supported = bool(verdict.get("supported"))
+    contradicted = bool(verdict.get("contradicted"))
+    if supported and not contradicted:
+        verdict["verdict"] = "TRUE"
+    elif contradicted and not supported:
+        verdict["verdict"] = "FALSE"
+    else:
+        verdict["verdict"] = "UNVERIFIABLE"
+
     return verdict
 
 def fact_check(transcript: str, on_result=None, verbose=False) -> list[dict]:

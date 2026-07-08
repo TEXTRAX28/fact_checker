@@ -102,6 +102,46 @@ fact_check()
  `-- 4. DISPLAY   on_result() --> _print_one_result() --> show_results()
 ```
 
+```mermaid
+flowchart TD
+
+    A[Extracted Claim]
+
+    A --> B[Tavily Search - advanced depth]
+
+    B --> C{Score above 0.3?}
+    C -->|No| C1[Discarded and logged]
+    C -->|Yes| D[Rank by Domain Quality]
+
+    D --> E[Top 3 Sources]
+
+    E --> F[Clean and Format Evidence]
+
+    F --> G[Llama 3.3 70B]
+
+    G --> H[supported: true or false]
+    G --> H2[contradicted: true or false]
+
+    H --> I{Python derives verdict}
+    H2 --> I
+
+    I -->|supported, not contradicted| J[TRUE]
+    I -->|contradicted, not supported| K[FALSE]
+    I -->|neither, or both| L[UNVERIFIABLE]
+
+    G --> M[Confidence Score]
+    G --> N[Explanation]
+    G --> O[Evidence URLs]
+
+    J --> P[Display Result]
+    K --> P
+    L --> P
+
+    M --> P
+    N --> P
+    O --> P
+```
+
 
 Step 2 runs concurrently across all claims, then step 3 runs concurrently across all claims
 (`ThreadPoolExecutor` each time); step 4 still reveals results one at a time, in the original
