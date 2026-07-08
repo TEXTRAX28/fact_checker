@@ -194,7 +194,7 @@ _MEDIUM_QUALITY = (
 _MIN_SCORE = 0.3
 
 def _filter_sources(results: list[dict]) -> list[dict]:
-    # Social/UGC domains are already excluded upstream via Tavily's exclude_domains. Checks for the high and medium quality 
+    # Social/UGC domains are already excluded upstream via Tavily's exclude_domains. Checks for the high and medium quality
     def rank(r):
         for domain in _HIGH_QUALITY:
             if domain in r["url"]:
@@ -207,34 +207,75 @@ def _filter_sources(results: list[dict]) -> list[dict]:
     results.sort(key=rank)
     return results[:3]
 
-def _search(query: str) -> tuple[str, list[str]]:
+def _domain(url: str) -> str:
+    from urllib.parse import urlparse
+    netloc = urlparse(url).netloc
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    return netloc
+
+def _score(r: dict) -> float:
+    return r.get("score", 0)
+
+def _search(query: str, claim_label: str = "", verbose: bool = False) -> tuple[str, list[str]]:
     # Low-quality/UGC domains excluded at the Tavily, not filtered after the fact check.
+    start = time.perf_counter()
     raw_results = _tavily_().search(query, max_results=10, exclude_domains=list(_LOW_QUALITY), search_depth="advanced").get("results", [])
 
-    results = []
+    passed = []
     for r in raw_results:
-        if r.get("score", 0) < _MIN_SCORE:
-            print(f"[filtered low-relevance] score={r.get('score', 0):.2f} {r.get('url', '')}")
-            continue
-        results.append(r)
+        if _score(r) >= _MIN_SCORE:
+            passed.append(r)
 
-    results = _filter_sources(results)
+    accepted = _filter_sources(passed)
+
+    accepted_urls = []
+    for r in accepted:
+        accepted_urls.append(r["url"])
+
+    rejected = []
+    for r in raw_results:
+        if r["url"] not in accepted_urls:
+            rejected.append(r)
+    rejected.sort(key=_score, reverse=True)
+
+    if verbose:
+        # One print() call per claim (not one per line): each claim's search runs in its own
+        # worker thread, so a block per print() call keeps concurrent claims' output from
+        # interleaving line-by-line on screen.
+        lines = []
+        lines.append(f"\nClaim {claim_label}  ({time.perf_counter() - start:.2f}s)")
+        lines.append(f"Retrieved: {len(raw_results)}")
+        lines.append("")
+        lines.append("Accepted")
+        for r in accepted:
+            lines.append(f"{_score(r):.2f} {_domain(r['url'])}")
+        lines.append("")
+        lines.append("Rejected")
+        for r in rejected:
+            lines.append(f"{_score(r):.2f} {_domain(r['url'])}")
+        print("\n".join(lines))
 
     urls = []
     text_parts = []
-    for r in results:
+    for r in accepted:
         urls.append(r["url"])
         text_parts.append(f"[{r['url']}]\n{r['content'][:600]}")
 
     text = "\n\n".join(text_parts)
     return text, urls
 
-def _verify_one(claim: dict, search_text: str, urls: list[str]) -> dict | None:
+def _verify_one(claim: dict, search_text: str, urls: list[str], verbose: bool = False) -> dict | None:
     # One verify call per claim: keeps each verdict paired with its own search results (no positional zip drift) and lets callers reveal results as they land.
     context = (f"SPEAKER: {claim.get('speaker', 'UNKNOWN')}\n"
                f"CLAIM: {claim['claim']}\n"
                f"SEARCH RESULTS:\n{search_text}\n")
+    start = time.perf_counter()
+    if verbose:
+        print(f"[v] DeepInfra verify -> {claim['claim'][:60]!r}")
     raw_reply = _chat(VERIFY_PROMPT, context, max_tokens=600)
+    if verbose:
+        print(f"[v] DeepInfra verify done in {time.perf_counter() - start:.2f}s -> {claim['claim'][:60]!r}")
 
     parsed = []
     for v in _parse_json_array(raw_reply):
@@ -273,8 +314,14 @@ def fact_check(transcript: str, on_result=None, verbose=False) -> list[dict]:
             return []
 
         try:
-            with _loading("Extracting claims (Llama 3.3 70B via DeepInfra)"):
+            start = time.perf_counter()
+            if verbose:
+                print("[v] DeepInfra extract -> starting")
                 raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=4000)
+                print(f"[v] DeepInfra extract done in {time.perf_counter() - start:.2f}s")
+            else:
+                with _loading("Extracting claims (Llama 3.3 70B via DeepInfra)"):
+                    raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=4000)
 
             claims = []
             for c in _parse_json_array(raw):
@@ -290,15 +337,24 @@ def fact_check(transcript: str, on_result=None, verbose=False) -> list[dict]:
 
         try:
             print(f"Found {len(claims)} claim(s).")
-            with _loading("Searching Tavily for evidence"):
+
+            def _run_searches():
                 with ThreadPoolExecutor() as pool:
                     search_futures = []
-                    for claim in claims:
-                        search_futures.append(pool.submit(_search, claim["query"]))
+                    for i, claim in enumerate(claims, start=1):
+                        claim_label = f"{i}/{len(claims)}"
+                        search_futures.append(pool.submit(_search, claim["query"], claim_label, verbose))
 
-                    search_results = []
+                    results = []
                     for f in search_futures:
-                        search_results.append(f.result())
+                        results.append(f.result())
+                    return results
+
+            if verbose:
+                search_results = _run_searches()
+            else:
+                with _loading("Searching Tavily for evidence"):
+                    search_results = _run_searches()
         except Exception as e:
             print(f"[ERROR] Search: {type(e).__name__}: {e}")
             return []
@@ -311,7 +367,7 @@ def fact_check(transcript: str, on_result=None, verbose=False) -> list[dict]:
             futures = []
             for claim, search_result in zip(claims, search_results):
                 search_text, urls = search_result
-                futures.append(pool.submit(_verify_one, claim, search_text, urls))
+                futures.append(pool.submit(_verify_one, claim, search_text, urls, verbose))
 
             error_count = 0
             for f in futures:

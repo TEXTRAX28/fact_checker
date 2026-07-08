@@ -314,112 +314,6 @@ So I tested using a different link where the news is directly from Indonesia wit
 
 Now I added a feature where the search is upgraded to "advance" (Tavily feature) and also I added a feature (also from Tavily) where it going to score the output by itself and also throw out if the score is less than 0.3. I changed the prompt as well to have the ouput the same language as the news 
 
-
-## Update 7/7
-
-To further evaluate the verification pipeline, I tested it using an Indonesian news article from Detik.
-
-```
-https://www.detik.com/hikmah/haji-dan-umrah/d-8564610/kemenhaj-usulkan-biaya-haji-2027-naik-hampir-rp-20-juta-per-jemaah
-```
-
-The initial results highlighted several issues in the retrieval and verification process. While the pipeline was generally able to extract the correct claims, the supporting evidence and generated explanations were often inconsistent.
-
-Some of the main issues observed were:
-
-- The verification explanations were inconsistent in language. Although the article was written in Bahasa Indonesia, some explanations were generated in English while others remained in Bahasa Indonesia.
-- Several supporting sources were unrelated to the claim being verified. In some cases, the retrieved articles discussed entirely different topics, reducing confidence in the verification results.
-- These irrelevant search results occasionally caused valid claims to be marked as **UNVERIFIABLE** or **FALSE**, despite the information being present in the original article.
-
-The output below shows the behaviour of the pipeline before any improvements were made.
-
-```text
-(.venv) PS C:\Users\natan\VSC Code\fact-checker> python main.py
-Real-Time Fact Checker
-Model: Llama 3.3 70B (DeepInfra)
-
-Input mode:
-  1. Microphone (live)
-  2. Live stream URL (YouTube/news)
-  3. Article URL
-  4. Paste text / paragraph
-
-> 3
-Article URL: https://www.detik.com/hikmah/haji-dan-umrah/d-8564610/kemenhaj-usulkan-biaya-haji-2027-naik-hampir-rp-20-juta-per-jemaah
-Fetching article...
-Trying Jina Reader...
-Fetched from Jina AI.
-
-Extracted 60 paragraphs. Fact-checking...
-
-Found 7 claim(s).                                 
-Verifying 7 claim(s) (Llama 3.3 70B via DeepInfra)...
-
-
-[TRUE]  SPEAKER_A
-  Claim:  Biaya Penyelenggaraan Ibadah Haji (BPIH) untuk musim haji 1448 Hijriah/2027 Masehi dipatok sebesar Rp 107.340.172,02 per jemaah
-  Conf:   [===================-] 95%
-  Why:    Beberapa sumber resmi dan berita mengkonfirmasi bahwa Biaya Penyelenggaraan Ibadah Haji (BPIH) untuk musim haji 1448 Hijriah/2027 Masehi dipatok sebesar Rp 107,34 juta per jemaah.
-  Sources (3):
-    = https://haji.go.id
-    = https://wartakota.tribunnews.com/news/894678/bpih-2027-diusulkan-naik-rp199-juta-dpr-optimistis-masih-bisa-diturunkan
-    = https://news.detik.com/berita/d-8564386/kemenhaj-siapkan-skema-agar-biaya-jemaah-haji-2027-tak-naik-meski-bpih-naik
-
-[TRUE]  SPEAKER_A
-  Claim:  BPIH tahun 2027 Masehi meningkat sekitar Rp 19,93 juta dibandingkan BPIH tahun 2026
-  Conf:   [===================-] 95%
-  Why:    The claim is supported by multiple sources, including idxchannel.com, which states that the BPIH for 2027 is proposed to be Rp107,3 juta, an increase of more than Rp19 juta from the BPIH for 2026. Another source, mozaik.inilah.com, also reports that the government has proposed an increase in BPIH for 2027 to Rp107 juta per person.
-  Sources (3):
-    = https://www.idxchannel.com/syariah/menhaj-usul-bpih-2027-jadi-rp107-juta-naik-hampir-rp20-juta-dari-haji-2026
-    = https://mozaik.inilah.com/haji-dan-umroh/ppih-arab-saudi-terapkan-penomoran-hotel-jemaah-berbasis-sektor-berikut-peta-persebarannya
-    = https://www.idxchannel.com/syariah/kemenhaj-fokus-benahi-penyelenggaraan-haji-2027
-
-[UNVERIFIABLE]  SPEAKER_A
-  Claim:  Sekitar Rp 60.891.068 atau 56,73 persen dari total usulan biaya digunakan untuk kebutuhan penyelenggaraan ibadah haji di Arab Saudi
-  Conf:   [============--------] 60%
-  Why:    The search results do not provide direct evidence to support or contradict the claim, and the information available is not sufficient to confirm the percentage of the total proposed budget used for hajj organization needs in Saudi Arabia.
-  Sources (3):
-    = https://khazanah.republika.co.id/berita/seq5r3451/bsi-transaksi-penukaran-mata-uang-sar-naik-5718-persen-di-musim-haji
-    = https://www.metrotvnews.com/read/bJEC4Eon-bpkh-limited-siap-ekspansi-bisnis-di-arab-saudi
-    = https://khazanah.republika.co.id/berita/tgo1cg483/jamaah-dari-madinah-segera-pulang-ppih-minta-air-zamzam-tak-dimasukkan-ke-koper-bagasi
-
-[FALSE]  SPEAKER_A
-  Claim:  Rp 46.449.103 atau 43,27 persen dari total usulan biaya digunakan untuk biaya penyelenggaraan di dalam negeri
-  Conf:   [================----] 80%
-  Why:    The claim states that Rp 46.449.103 or 43.27% of the total proposed budget is used for domestic pilgrimage costs, but the search results provide different values for BPIH, ranging from Rp 87.409.365,45 to Rp 89.4 juta, which do not match the claim.
-  Sources (3):
-    = https://www.fortuneidn.com/sharia/tabungan-haji-muda-bsi-terus-naik-tembus-lebih-dari-65-ribu-rekening-00-4vfn9-9nfbz4
-    = https://amphuri.org/inilah-besaran-biaya-haji-reguler-10-tahun-terakhir
-    = https://www.metrotvnews.com/read/KXyCQo8j-kuota-haji-reguler-diy-sebanyak-3-147-orang
-
-[UNVERIFIABLE]  SPEAKER_A
-  Claim:  Kenaikan usulan BPIH dipengaruhi oleh perubahan asumsi nilai tukar rupiah, kenaikan biaya penerbangan, biaya akomodasi di Makkah dan Madinah, dan lain-lain
-  Conf:   [============--------] 60%
-  Why:    The search results do not provide clear evidence of the factors influencing the proposed increase in BPIH. While some sources mention the increase in BPIH, they do not explicitly state the reasons behind it.
-  Sources (3):
-    = https://voi.id/en/news/577840
-    = https://www.idntimes.com/news/indonesia/alat-deteksi-covid-19-genose-c19-masuk-2-jurnal-internasional-00-481xk-br66nc
-    = https://www.beritasatu.com/lifestyle/2794892/lirik-lagu-youre-still-the-one-dari-shania-twain-dan-terjemahannya
-
-[TRUE]  SPEAKER_A
-  Claim:  Pemerintah mengusulkan skema pembiayaan 60% nilai manfaat dan 40% Biaya Perjalanan Ibadah Haji (Bipih) untuk mengurangi dampak kenaikan BPIH
-  Conf:   [===================-] 95%
-  Why:    Kemenhaj mengusulkan skema pembiayaan haji 2027 dengan porsi BPIH 60 persen dan Bipih 40 persen. Pemerintah juga menyiapkan skema untuk mengurangi dampak kenaikan BPIH pada biaya jemaah haji 2027.
-  Sources (3):
-    = https://bpkh.go.id
-    = https://tradersunion.com/ind/news/financial-news/show/2555602-hajj-funding-2027-bpih-bipih-scheme
-    = https://news.detik.com/berita/d-8556463/pnm-raih-gcg-awards-2026-bukti-tata-kelola-berdampak
-
-[TRUE]  SPEAKER_A
-  Claim:  Menteri Haji dan Umrah Mochamad Irfan Yusuf menyampaikan usulan BPIH 2027 dalam rapat kerja bersama Komisi VIII DPR RI
-  Conf:   [===================-] 95%
-  Why:    Menteri Haji dan Umrah Mochamad Irfan Yusuf menyampaikan usulan BPIH 2027 dalam beberapa sumber, termasuk laman resmi Kemenhaj dan beberapa situs berita.
-  Sources (3):
-    = https://haji.go.id
-    = https://ekonomi.bisnis.com/read/20260708/12/1986362/biaya-haji-2027-berpotensi-naik-begini-usulan-kemenhaj
-    = https://nasional.sindonews.com/newsread/1726019/15/menhaj-buka-peluang-bpih-haji-2027-turun-jika-harga-minyak-dunia-terus-merosot-1783469258
-```
-
 To improve the quality of the verification pipeline, two changes were introduced.
 
 First, Tavily's search mode was upgraded to advance search, allowing the system to retrieve more comprehensive and relevant evidence for each extracted claim.
@@ -560,4 +454,26 @@ Verifying 10 claim(s) (Llama 3.3 70B via DeepInfra)...
     = https://dki.kemenag.go.id/berita/memilih-tidak-populer-dirjen-phu-gus-men-lindungi-hak-nilai-manfaat-seluruh-jemaah-haji-gJR98
     = https://bpkh.go.id
     = https://eprints.walisongo.ac.id/19845/1/1901056029_Masiran_Full%20Skripsi%20-%20Masiran%20smart1.pdf
+```
+
+During testing, another issue was identified in the article extraction stage. Although Jina Reader successfully retrieved the article, the extracted content still contained a significant amount of non-article text. Elements such as navigation menus, headers, footers, related article sections, and other page components were included alongside the main article body.
+
+As a result, the extractor reported approximately 60 paragraphs, even though many of those paragraphs did not contain actual news content. These irrelevant sections introduced unnecessary noise into the claim extraction process, increasing the likelihood of extracting weak or misleading claims.
+
+To address this, the extraction pipeline was updated to remove common webpage boilerplate before any downstream processing. Navigation bars, headers, footers, menus, recommendation widgets, and similar page elements are now filtered out so that only the main article content is retained.
+
+This preprocessing step produces a much cleaner input for claim extraction, reduces irrelevant claims, and allows the verification pipeline to focus solely on the information presented in the article itself.
+
+### Before 
+```
+Extracted 60 paragraphs. Fact-checking...
+
+Found 5 claim(s).
+```
+
+### After 
+```
+Extracted 23 paragraphs. Fact-checking...
+
+Found 7 claim(s).  
 ```

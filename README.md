@@ -1,8 +1,16 @@
 ﻿# Real-Time Fact Checker
 
-## Simple Overview
+## Project Objective
 
-A real-time fact-checking tool that listens to speech (microphone, live streams, articles, or text) and instantly verifies claims against web sources. Returns 3-tier verdicts (TRUE UNVERIFIABLE / FALSE) with confidence scores and source links, streamed one claim at a time.
+## Project Objective
+
+The primary objective of this project is to develop a real-time fact-checking system that helps users verify factual claims from news articles, live speeches, and video streams. The motivation for this project comes from the increasing difficulty of determining whether information presented by news media or public figures is accurate. In Indonesia, as in many other countries, people are often exposed to conflicting reports from different media outlets, making it challenging to distinguish verified information from misinformation or incomplete reporting.
+
+Public speeches delivered by government officials and political leaders can also contain a large number of factual claims that are difficult for viewers to verify in real time. Since these speeches are often broadcast live and widely shared online, inaccurate or misleading statements can spread quickly before they are independently checked.
+
+To address this problem, the proposed system automatically extracts factual claims from multiple input sources, including live microphone input, live video streams, news articles, and manually entered text. Each claim is then verified against information gathered from multiple reliable online sources before assigning a verdict such as **TRUE**, **FALSE**, or **UNVERIFIABLE**, together with an explanation and supporting evidence.
+
+The goal is not to determine political opinions or judge individuals, but to provide users with an independent tool that assists them in verifying factual statements. By enabling near real-time verification of news reports and live speeches, the system aims to reduce the spread of misinformation, improve transparency, and help users make more informed decisions based on verifiable evidence. This approach is consistent with the broader purpose of fact-checking, which focuses on objectively verifying factual claims using transparent evidence and reliable sources.
 
 **4 input modes:**
 - **Microphone** -> Live speech fact-checking
@@ -90,24 +98,13 @@ modes are actually built.
 
 Call chain for Mode 3 (Article URL) and Mode 4 (Paste text), the two working modes:
 
-```
-main()
- |-- "3" --> run_article() --> _fetch_article() --> _clean_article() --> fact_check()
- `-- "4" --> run_text()     -------------------->    _clean_article() --> fact_check()
-
-fact_check()
- |-- 1. EXTRACT   _chat()  -->  _parse_json_array()
- |-- 2. SEARCH    _search()  -->  _filter_sources()        (parallel, once per claim)
- |-- 3. VERIFY    _verify_one()  -->  _chat()  -->  _parse_json_array()   (parallel, once per claim)
- `-- 4. DISPLAY   on_result() --> _print_one_result() --> show_results()
-```
 
 ```mermaid
 flowchart TD
 
     A[Extracted Claim]
 
-    A --> B[Tavily Search - advanced depth]
+    A --> B[Tavily Search (advanced depth)]
 
     B --> C{Score above 0.3?}
     C -->|No| C1[Discarded and logged]

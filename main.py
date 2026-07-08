@@ -20,16 +20,22 @@ def _usable(raw: str | None, minimum: int = MIN_PARAGRAPHS) -> bool:
     # Gate on real content after cleaning, not raw length: a bot-blocked page can be 500+ chars of nav/menu junk that _clean_article strips down to almost nothing.
     return bool(raw) and _clean_article(raw).count("[SPEAKER_A]") >= minimum
 
-def _fetch_article(url: str) -> tuple[str | None, str]:
+def _fetch_article(url: str, verbose: bool = False) -> tuple[str | None, str]:
     from urllib.request import urlopen, Request
     from urllib.parse import urlparse
     import json
+    import time
+
+    def _vlog(label: str, start: float, extra: str = ""):
+        if verbose:
+            print(f"[v] {label} done in {time.perf_counter() - start:.2f}s{extra}")
 
     warning = ""
     content = None
 
     # Tier 1: Jina reader
     print("Trying Jina Reader...")
+    start = time.perf_counter()
     try:
         req = Request(
             f"https://r.jina.ai/{url}",
@@ -41,29 +47,34 @@ def _fetch_article(url: str) -> tuple[str | None, str]:
             },
         )
         content = urlopen(req, timeout=15).read().decode("utf-8")
+        _vlog("Jina fetch", start, f" ({len(content)} chars)")
         if _usable(content):
             return content, "Fetched from Jina AI.\n"
         warning = "[Warning] Could not fully read that page (paywalled, bot-blocked, or JS-rendered).\n"
-    except Exception:
-        pass
+    except Exception as e:
+        _vlog("Jina fetch", start, f" (failed: {type(e).__name__}: {e})")
 
     # Tier 2: Wayback Machine
     if not _usable(content):
         print("Jina Reader unavailable, trying Wayback Machine...")
         try:
+            start = time.perf_counter()
             req = Request(
                 f"https://archive.org/wayback/available?url={url}",
                 headers={"User-Agent": "Mozilla/5.0"},
             )
             resp = json.loads(urlopen(req, timeout=10).read().decode("utf-8"))
+            _vlog("Wayback availability check", start)
             snapshot_url = resp.get("archived_snapshots", {}).get("closest", {}).get("url")
             if snapshot_url:
+                start = time.perf_counter()
                 req = Request(snapshot_url, headers={"User-Agent": "Mozilla/5.0"})
                 content = urlopen(req, timeout=15).read().decode("utf-8")
+                _vlog("Wayback snapshot fetch", start, f" ({len(content)} chars)")
                 if _usable(content):
                     return content, warning + "Fetched from Wayback Machine.\n"
-        except Exception:
-            pass
+        except Exception as e:
+            _vlog("Wayback fetch", start, f" (failed: {type(e).__name__}: {e})")
 
     # Tier 3: Tavily search (last resort, accept any usable snippet, not full-article length)
     if not _usable(content):
@@ -72,13 +83,15 @@ def _fetch_article(url: str) -> tuple[str | None, str]:
             from fact_checker import _tavily_
             normalized_url = url if "://" in url else f"https://{url}"
             domain = urlparse(normalized_url).netloc
+            start = time.perf_counter()
             results = _tavily_().search(f"site:{domain}", max_results=1)
+            _vlog("Tavily fallback search", start)
             if results.get("results"):
                 content = results["results"][0]["content"]
                 if _usable(content, minimum=1):
                     return content, f"{warning}Fetched from Tavily.\n"
-        except Exception:
-            pass
+        except Exception as e:
+            _vlog("Tavily fallback search", start, f" (failed: {type(e).__name__}: {e})")
 
     return None, warning + "  Could not fetch any usable content.\n" if warning else "Could not fetch article.\n"
 
@@ -111,7 +124,7 @@ def _print_one_result(result: dict):
     show_results([result])
 
 # Feature #3: URL
-def run_article():
+def run_article(verbose: bool = False):
     try:
         url = input("Article URL: ").strip()
         if not url:
@@ -120,7 +133,7 @@ def run_article():
 
         print("Fetching article...")
         try:
-            raw, warning = _fetch_article(url)
+            raw, warning = _fetch_article(url, verbose)
             if not raw:
                 print(f"ERROR: {warning or 'Could not fetch that URL. Tried: Jina Reader → Wayback Machine → Tavily Search'}")
                 return
@@ -145,7 +158,7 @@ def run_article():
             return
 
         print(f"Extracted {count} paragraphs. Fact-checking...\n")
-        fact_check(text, on_result=_print_one_result, verbose=True)
+        fact_check(text, on_result=_print_one_result, verbose=verbose)
 
     except KeyboardInterrupt:
         print("\nCancelled by user")
@@ -154,7 +167,7 @@ def run_article():
 
 
 # Feature #4: Text
-def run_text():
+def run_text(verbose: bool = False):
     try:
         print("Paste your text, then press Enter twice when done:")
         lines = []
@@ -184,7 +197,7 @@ def run_text():
             return
 
         print(f"\nExtracted {count} paragraphs. Fact-checking...\n")
-        fact_check(text, on_result=_print_one_result, verbose=True)
+        fact_check(text, on_result=_print_one_result, verbose=verbose)
 
     except KeyboardInterrupt:
         print("\nCancelled by user")
@@ -193,6 +206,12 @@ def run_text():
         
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Real-Time Fact Checker")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                         help="Log every external call (DeepInfra, Tavily, Jina, Wayback) with timing")
+    args = parser.parse_args()
+
     print("Real-Time Fact Checker")
     print("Model: Llama 3.3 70B (DeepInfra)\n")
 
@@ -210,9 +229,9 @@ def main():
         elif choice == "2":
             run_stream()
         elif choice == "3":
-            run_article()
+            run_article(args.verbose)
         elif choice == "4":
-            run_text()
+            run_text(args.verbose)
         else:
             print("ERROR: Invalid choice, pick 1-4")
     except KeyboardInterrupt:

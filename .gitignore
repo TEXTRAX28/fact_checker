@@ -1,6 +1,5 @@
-# Environment variables — CRITICAL: keep API keys out of version control
+# Environment variables
 .env
-.env.*
 *.env
 
 # Python
@@ -51,6 +50,6 @@ system_prompt.md
 NOTES.md
 ARCHITECTURE.md
 
-# graphify output (generated, regenerate with /graphify)
+# graphify 
 graphify-out/
 
