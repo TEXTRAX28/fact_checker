@@ -1,4 +1,4 @@
-﻿import json
+import json
 import os
 import re
 import sys
@@ -57,6 +57,10 @@ Return a JSON array. Each item must have:
 
 Only include: statistics, numbers, dates, named events, quotes, scientific/medical/legal/historical facts.
 Skip: opinions, predictions, vague statements, rhetorical questions.
+Also skip routine procedural narration the source already states as plain, undisputed fact (a plea
+entered, a filing date, a standard step in a legal/administrative process), UNLESS it contains a
+specific number, quote, or attribution that could plausibly be misreported. Routine narration has
+near-zero misinformation risk and isn't worth a search+verify call.
 
 If two or more figures are stated as complementary parts of one whole (a percentage split, a
 budget breakdown, a ratio that sums to a total), extract them as ONE claim describing the full
@@ -73,10 +77,12 @@ Each object in the array must have:
   "claim": the original claim text
   "supported": true ONLY if the evidence explicitly and directly confirms the claim. False otherwise,
                including when the evidence is simply silent or missing, silence is not support.
-  "contradicted": true ONLY if the evidence explicitly and directly contradicts the claim (states a
-                   different number, denies the event, etc.), OR the claim is comparative/superlative
-                   and fails the historical-comparison test below. False if the evidence is merely
-                   silent, absent, or doesn't mention the claim at all, absence is not contradiction.
+  "contradicted": true ONLY if the evidence explicitly and directly contradicts the claim (denies
+                   the event, states a number that changes the claim's meaning, not just a rounding/
+                   date/conversion difference, see NUMERIC TOLERANCE below before marking any numeric
+                   mismatch as contradicted), OR the claim is comparative/superlative and fails the
+                   historical-comparison test below. False if the evidence is merely silent, absent,
+                   or doesn't mention the claim at all, absence is not contradiction.
   "verdict": one of TRUE / UNVERIFIABLE / FALSE, this field is informational only and will be
              recomputed from "supported"/"contradicted" downstream, but fill it in consistently:
              supported=true & contradicted=false -> TRUE
@@ -97,6 +103,27 @@ Confidence guidelines:
 The most common mistake is treating "I found no evidence either way" as FALSE. It is not, that is
 UNVERIFIABLE. Only mark FALSE when the evidence actively says something different from the claim,
 never because the evidence is merely absent or thin.
+
+NUMERIC TOLERANCE (apply this BEFORE setting contradicted=true on any numeric claim):
+A numeric claim is NOT contradicted just because a source states a different specific number.
+Sources routinely round, convert currency, measure from a different baseline, or report a different
+date. Only set contradicted=true if the gap is large enough to change what a reader would take away
+from the claim, roughly: off by more than ~10%, off by an order of magnitude, or it crosses a
+meaningful threshold the claim depends on (e.g. "over 1 million" vs an actual 800,000 changes the
+claim's meaning; "1.05 million" vs an actual 1 million does not). If multiple sources disagree
+slightly among themselves (e.g. 324m vs 330m for the same structure), that spread itself signals
+normal measurement/rounding variance, not grounds to contradict a claim landing near that range.
+This applies to ANY numeric claim, not just money: heights, distances, dates, counts, percentages.
+e.g. a claim of "$125m in losses" against a source saying "$120m" is supported, not contradicted,
+and a claim of "approximately 335 meters" against sources saying 324m-330m is supported, not
+contradicted, small measurement variance is not a fabrication.
+
+EVIDENCE ABOUT A DIFFERENT INSTANCE IS NOT THE SAME AS NO EVIDENCE:
+If the search results discuss a different specific instance of a similar recurring subject (a
+different session, year, edition, or version than the one named in the claim), that is not the
+same as finding zero evidence. Do not use it to support or contradict the claim (still
+UNVERIFIABLE, leave both false), but say so explicitly in the explanation, e.g. "sources cover the
+78th session, not the 80th session named in the claim" rather than a generic "no evidence found."
 
 COMPARATIVE AND SUPERLATIVE CLAIMS (CRITICAL):
 If the claim contains comparative or superlative phrases like "nearer than ever before", "best ever", "highest ever", "more than before", "closest ever", "farthest ever", "one of the largest", "unprecedented", it requires DIFFERENT evidence than general claims.

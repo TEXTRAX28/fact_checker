@@ -123,6 +123,26 @@ def _print_one_result(result: dict):
     # Passed as fact_check's on_result callback so each verdict prints the moment it's ready, instead of waiting for the whole batch.
     show_results([result])
 
+def _run_fact_check(raw: str, verbose: bool, label: str):
+    # Shared by run_article/run_text: they gather raw text differently (fetch vs paste),
+    # but clean -> count -> fact_check is identical from here on.
+    try:
+        text = _clean_article(raw)
+        if not text:
+            print(f"ERROR: Could not extract any readable content from {label} (may be too short or heavily formatted)")
+            return
+    except Exception as e:
+        print(f"ERROR while cleaning {label}: {type(e).__name__}: {e}")
+        return
+
+    count = text.count("[SPEAKER_A]")
+    if count < 1:
+        print(f"ERROR: No paragraphs extracted from {label}")
+        return
+
+    print(f"\nExtracted {count} paragraphs. Fact-checking...\n")
+    fact_check(text, on_result=_print_one_result, verbose=verbose)
+
 # Feature #3: URL
 def run_article(verbose: bool = False):
     try:
@@ -143,22 +163,7 @@ def run_article(verbose: bool = False):
             print(f"ERROR while fetching: {type(e).__name__}: {e}")
             return
 
-        try:
-            text = _clean_article(raw)
-            if not text:
-                print("ERROR: Could not extract any readable content from article (may be too short or heavily formatted)")
-                return
-        except Exception as e:
-            print(f"ERROR while cleaning article: {type(e).__name__}: {e}")
-            return
-
-        count = text.count("[SPEAKER_A]")
-        if count < 1:
-            print("ERROR: No paragraphs extracted from article")
-            return
-
-        print(f"Extracted {count} paragraphs. Fact-checking...\n")
-        fact_check(text, on_result=_print_one_result, verbose=verbose)
+        _run_fact_check(raw, verbose, "article")
 
     except KeyboardInterrupt:
         print("\nCancelled by user")
@@ -182,28 +187,13 @@ def run_text(verbose: bool = False):
             print("ERROR: No text provided")
             return
 
-        try:
-            text = _clean_article(raw)
-            if not text:
-                print("ERROR: Could not extract any content (text may be too short or heavily formatted)")
-                return
-        except Exception as e:
-            print(f"ERROR while cleaning text: {type(e).__name__}: {e}")
-            return
-
-        count = text.count("[SPEAKER_A]")
-        if count < 1:
-            print("ERROR: No paragraphs extracted from text")
-            return
-
-        print(f"\nExtracted {count} paragraphs. Fact-checking...\n")
-        fact_check(text, on_result=_print_one_result, verbose=verbose)
+        _run_fact_check(raw, verbose, "text")
 
     except KeyboardInterrupt:
         print("\nCancelled by user")
     except Exception as e:
         print(f"ERROR: Unexpected error: {type(e).__name__}: {e}")
-        
+
 
 def main():
     import argparse
