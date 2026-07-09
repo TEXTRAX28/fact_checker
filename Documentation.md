@@ -165,7 +165,7 @@ Test #1 fixed Wikipedia over-representation on the Nadiem Makarim article, but t
 
 ### Wikipedia Fix: Confirmed Fixed
 
-Across all 5 verdicts and 13 total source slots in this output, `wikipedia.org` appears **exactly once**, in claim 1's sources list:
+Across all 5 verdicts and 14 total source slots in this output, `wikipedia.org` appears **exactly once**, in claim 1's sources list:
 
 ```
 Sources (2):
@@ -477,3 +477,126 @@ Extracted 23 paragraphs. Fact-checking...
 
 Found 7 claim(s).  
 ```
+
+---
+
+## Empty Search Evidence Caused Hallucinated Verdicts (9/7)
+
+### The Problem
+
+While testing that a single failed Tavily search no longer kills the whole
+batch (see the fix in `HANDOFF.md`), `TAVILY_API_KEY` was intentionally set
+to an invalid value ("broken") to force a real search failure. The failure-containment
+fix worked correctly, it printed an error for each claim's search and moved
+on instead of crashing. But the claim still went to the verifier with a
+completely empty evidence block, and the pipeline sent it to the model
+anyway.
+
+The model did not say "I have no evidence." It answered from its own
+training knowledge instead, at full confidence, and **invented source URLs**
+that were never actually fetched by anything.
+
+### Real Example: Before Fix
+
+```
+> 4
+Paste your text, then press Enter twice when done:
+Earth is square. Hitler is from Indonesia.
+
+Searching Tavily for evidence...[ERROR] Search: InvalidAPIKeyError: Unauthorized: missing or invalid API key.
+[ERROR] Search: InvalidAPIKeyError: Unauthorized: missing or invalid API key.
+Verifying 2 claim(s) (Llama 3.3 70B via DeepInfra)...
+
+[FALSE]  SPEAKER_A
+  Claim:  Earth is square
+  Conf:   [====================] 100%
+  Why:    Numerous scientific studies and observations have consistently shown
+          that the Earth is an oblate spheroid...
+  Sources (3):
+    = https://www.nasa.gov/
+    = https://www.noaa.gov/
+    = https://www.britannica.com/
+
+[FALSE]  SPEAKER_A
+  Claim:  Hitler is from Indonesia
+  Conf:   [====================] 100%
+  Why:    Adolf Hitler was born in Braunau am Inn, Austria, not Indonesia.
+          Historical records and reliable sources confirm his birthplace.
+  Sources (2):
+    = https://www.britannica.com/biography/Adolf-Hitler
+    = https://www.history.com/topics/world-war-ii/adolf-hitler
+```
+
+Both verdicts happen to be correct. Both are also completely unverified, every search call failed, so all five of those source URLs were fabricated
+by the model, not retrieved by Tavily. `VERIFY_PROMPT` explicitly says
+`"sources": array of URLs from the search results`, and the model ignored
+that the moment there were no real search results to draw from.
+
+### Why This Is Worse Than It Looks
+
+A search that fails and returns nothing is honest. A hallucinated verdict
+with invented citations is not, and it is indistinguishable in the output
+from a properly verified one. This test only looked harmless because both
+claims are trivia-level facts the model already knows cold from training.
+This tool's actual purpose is *real-time* claims, current events, this
+week's numbers exactly the category of thing the model's training data
+cannot know. If search fails on a claim like that, the same failure mode
+would produce a confident, fully-cited, and potentially *wrong* answer with
+no way for the user to tell it apart from a real one. Prompt wording alone
+("silence is not support") was not enough to stop this in practice, it
+needed to be enforced in code.
+
+### The Fix
+
+`_verify_one()` (`fact_checker.py`) now checks for empty search evidence
+before it ever calls the LLM:
+
+```python
+def _verify_one(claim: dict, search_text: str, urls: list[str], verbose: bool = False) -> dict | None:
+    if not search_text:
+        raise NoEvidenceError(f"no search evidence for claim: {claim['claim'][:60]!r}")
+    ...
+```
+
+`NoEvidenceError` is a small custom exception, it is caught by the same per-claim error handling that already exists in the verify loop, so a no-evidence claim now cleanly drops out of the final results with a console `[ERROR] Verification: NoEvidenceError: ...` line, instead of a fabricated verdict being shown as if it were real.
+
+### Real Example: After Fix
+
+Same broken key, same two claims:
+
+```
+Searching Tavily for evidence...[ERROR] Search: InvalidAPIKeyError: Unauthorized: missing or invalid API key.
+[ERROR] Search: InvalidAPIKeyError: Unauthorized: missing or invalid API key.
+Verifying 2 claim(s) (Llama 3.3 70B via DeepInfra)...
+```
+
+No verdict blocks are printed. Both claims are correctly dropped - zero
+fabricated citations, zero false confidence.
+
+### Raw-Response Verbose Logging
+
+Diagnosing this took longer than it should have, because `-v` verbose mode
+only logged *timing* for each DeepInfra call, never what the model actually
+returned. Fixed by extending verbose mode: both the extract call and each
+per-claim verify call now print the model's raw, unmodified response text
+under `-v`, bounded by clear markers:
+
+```
+[v] --- RAW RESPONSE (verify: 'The earth is flat') ---
+<exact model output, unmodified>
+[v] --- END RAW RESPONSE ---
+```
+
+Each claim's block is built as one string and printed with a single
+`print()` call, not several, verify runs every claim concurrently in its
+own thread, and separate print calls would let concurrent claims' raw text into a mess on screen.
+
+This is also what explained a separate, unrelated mystery from the same
+testing session: a claim that silently vanished from a normal run (working
+API key, no errors logged) turned out to have taken 24.60s to verify versus
+~5s for its sibling claims in the same batch - a strong sign the model's
+raw response was abnormally long, malformed, or ran into extra prose despite
+`VERIFY_PROMPT`'s "no analysis, no prose" instruction, rather than a
+legitimate low-confidence judgment. Previously this was only visible as a
+suspicious timing number; now the raw text itself is visible, which is what
+this kind of failure actually needs to be debuggable.

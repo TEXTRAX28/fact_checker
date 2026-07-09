@@ -7,8 +7,13 @@ COLORS = {
 }
 RESET = "\033[0m"
 
-def _bar(confidence: int) -> str:
-    filled = int(confidence) // 5
+def _bar(confidence) -> str:
+    try:
+        confidence = int(confidence)
+    except (TypeError, ValueError):
+        confidence = 0
+    confidence = max(0, min(100, confidence))
+    filled = confidence // 5
     return f"[{'=' * filled}{'-' * (20 - filled)}] {confidence}%"
 
 def _format_source(url: str) -> str:

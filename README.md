@@ -2,8 +2,6 @@
 
 ## Project Objective
 
-## Project Objective
-
 The primary objective of this project is to develop a real-time fact-checking system that helps users verify factual claims from news articles, live speeches, and video streams. The motivation for this project comes from the increasing difficulty of determining whether information presented by news media or public figures is accurate. In Indonesia, as in many other countries, people are often exposed to conflicting reports from different media outlets, making it challenging to distinguish verified information from misinformation or incomplete reporting.
 
 Public speeches delivered by government officials and political leaders can also contain a large number of factual claims that are difficult for viewers to verify in real time. Since these speeches are often broadcast live and widely shared online, inaccurate or misleading statements can spread quickly before they are independently checked.
@@ -44,16 +42,15 @@ For website URLs, it uses a three-step fallback method: first trying Jina Reader
 | **Parallel Processing** | ThreadPoolExecutor | Concurrent search operations |
 | **Output** | JSON + Terminal UI | Color-coded results display with 3-tier verdict |
 
-Audio transcription (faster-whisper, sounddevice) was removed along with `transcriber.py`
-since Modes 1 and 2 are currently just placeholders. It can be added back when those
-modes are actually built.
+Modes 1 (Microphone) and 2 (Live stream) are currently placeholders with no audio
+capture or transcription dependencies wired in yet.
 
 **Services:**
 - **DeepInfra** = LLM inference (Llama 3.3 70B), OpenAI-compatible API
   - Roughly $3/month at light usage
 - **Tavily** = Web search API
   - Free tier: ~100 searches/month
-  - Each query pulls up to 10 results with social/UGC domains excluded server-side; the top 3 are kept after ranking (official sources first, Wikipedia last), 600-char snippets
+  - Each query pulls up to 10 results with social/UGC domains excluded server-side; the top 3 are kept after ranking (official sources first, Wikipedia second, unrecognized domains last), 600-char snippets
 - **Jina Reader** = Article text extraction
   - No auth required, free tier available
 - **Wayback Machine** = Internet Archive snapshots
@@ -68,6 +65,22 @@ modes are actually built.
 - **Live Stream:** Mode 2, coming soon (currently a placeholder)
 - **URL:** Fetch article via Jina -> Wayback -> Tavily fallback chain
 - **Text:** Accept manually pasted content
+
+**Article fetch fallback chain** (Mode 3 only - Mode 4 skips straight to cleaning):
+
+```mermaid
+flowchart TD
+    A[Article URL] --> B[Tier 1: Jina Reader]
+    B --> C{Usable content?<br/>at least 5 paragraphs}
+    C -->|Yes| Z[Return content]
+    C -->|No| D[Tier 2: Wayback Machine]
+    D --> E{Usable content?}
+    E -->|Yes| Z
+    E -->|No| F[Tier 3: Tavily search snippet]
+    F --> G{Usable content?<br/>at least 1 paragraph}
+    G -->|Yes| Z
+    G -->|No| H[Return None + warning]
+```
 
 ### Step 2: Extract Claims
 - Send the text to the Llama 70B model
@@ -86,7 +99,7 @@ modes are actually built.
 - **Live-state guard:** Claims about current/ongoing state (vote counts, current officeholder) with no recent, direct evidence return UNVERIFIABLE instead of a guess
 - **Comparative-claim guard:** Superlative claims ("nearer than ever," "best ever") require explicit historical evidence, not just general trend data
 - **Source filtering:** Social/UGC domains (Facebook, YouTube, X, Reddit, TikTok, Medium) are excluded at the Tavily API level via `exclude_domains`, not filtered after the fact
-- **Source ranking:** Official/high-quality domains (Reuters, AP, BBC, .gov, WHO, World Bank, UN, IMF, Nature, etc.) are prioritized first; Wikipedia is demoted last but still used as a fallback if nothing else is available
+- **Source ranking:** Official/high-quality domains (Reuters, AP, BBC, .gov, WHO, World Bank, UN, IMF, Nature, etc.) are prioritized first; Wikipedia ranks below those but above unrecognized domains, so it's demoted, not buried behind an arbitrary blog
 - **Entity-aware search queries:** Claim extraction includes the specific named person/company/organization in the search query so primary sources surface over generic aggregator sites
 - **Fallback chain:** If a page is thin or blocked, try archive then search, gated on real cleaned content, not byte count
 - **Parallel within each phase:** All claims are searched concurrently, then all claims are verified concurrently, for speed
@@ -96,6 +109,19 @@ modes are actually built.
 
 ## Code Flow
 
+**Pipeline overview** - capture -> extract -> search/verify (per claim) -> display:
+
+```mermaid
+flowchart LR
+    A[Article URL or Pasted Text] --> B{Input Type}
+    B -->|URL| C[Fetch Article<br/>Jina -> Wayback -> Tavily]
+    B -->|Text| D[Clean & Label Paragraphs]
+    C --> D
+    D --> E[Extract Claims<br/>Llama 3.3 70B]
+    E --> F[Per-Claim Search + Verify<br/>see detail below]
+    F --> G[Display Results<br/>streamed in claim order]
+```
+
 Call chain for Mode 3 (Article URL) and Mode 4 (Paste text), the two working modes:
 
 
@@ -104,7 +130,7 @@ flowchart TD
 
     A[Extracted Claim]
 
-    A --> B[Tavily Search (advanced depth)]
+    A --> B["Tavily Search (advanced depth)"]
 
     B --> C{Score above 0.3?}
     C -->|No| C1[Discarded and logged]
@@ -170,7 +196,7 @@ claim order, as each one finishes.
 | `_tavily_()` | Lazy singleton client for Tavily search |
 | `_parse_json_array()` | Recovers a clean JSON array from imperfect model output |
 | `_search()` | Runs one Tavily search for a claim's query |
-| `_filter_sources()` | Ranks results: official sources first, Wikipedia last |
+| `_filter_sources()` | Ranks results: official sources first, Wikipedia second, unrecognized domains last |
 | `_verify_one()` | Verifies a single claim against its own search results |
 
 **display.py**

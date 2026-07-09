@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import re
 import sys
@@ -31,6 +31,10 @@ def _loading(message: str):
     finally:
         stop.set()
         thread.join()
+
+class NoEvidenceError(Exception):
+    # Raised when a claim has zero search evidence to verify against (search failed or returned nothing usable). 
+    pass
 
 # DeepInfra API (OpenAI-compatible)
 _deepinfra_client = None
@@ -100,10 +104,11 @@ If the claim contains comparative or superlative phrases like "nearer than ever 
 For these claims:
   - Do NOT accept general trend data (e.g., "improving" or "growing") as proof of "closer than ever"
   - Require explicit historical comparison: minimum/maximum values, time-series data, or direct statements comparing current vs past
-  - If the sources show ONLY that the subject is improving but provide NO historical minimum/maximum or time-series comparison, set contradicted=true (the claim requires evidence you don't have, this is the one case where "no proof" counts as a contradiction, because a superlative claim's burden of proof is the historical comparison itself)
+  - If the sources show ONLY that the subject is improving but provide NO historical minimum/maximum or time-series comparison, leave both supported and contradicted false (UNVERIFIABLE) - the specific superlative hasn't been proven, but general trend data isn't evidence against it either
   - If the sources provide clear historical data showing this IS the closest/best/highest point, set supported=true
+  - Only set contradicted=true if the sources show the OPPOSITE: historical data proving some past point was actually closer/better/higher than now
 
-Example: "Indonesia is nearer than ever before to ending poverty" + sources showing "progress in poverty reduction" = contradicted=true (progress is not the same as "closest ever"). Only set supported=true if you find historical poverty rates proving current levels are lowest ever.
+Example: "Indonesia is nearer than ever before to ending poverty" + sources showing only "progress in poverty reduction" = UNVERIFIABLE (progress is not the same as "closest ever," but it's not evidence against it either). Only set supported=true if you find historical poverty rates proving current levels are lowest ever; only set contradicted=true if you find historical rates proving a past level was actually lower.
 
 If the claim is about a CURRENT or ONGOING state (who currently holds office, live negotiations, present-day support), and the sources do not contain recent, direct evidence, leave both supported and contradicted false (UNVERIFIABLE). Do NOT infer a verdict from general or historical information.
 
@@ -147,8 +152,8 @@ def _chat(system: str, user: str, max_tokens: int) -> str:
 
 def _parse_json_array(text: str) -> list:
     text = re.sub(r"```(?:json)?\n?|```", "", text)
-    # quote bare enums (e.g. "verdict": TRUE -> "verdict": "TRUE")
-    text = re.sub(r':\s*(UNVERIFIABLE|TRUE|FALSE)\b', r': "\1"', text)
+    # quote bare enums (e.g. "verdict": TRUE -> "verdict": "TRUE"). Anchored to the "verdict" key specifically, not just any ": TRUE"/": FALSE" otherwise a colon inside an explanation string gets corrupted too.
+    text = re.sub(r'("verdict"\s*:\s*)(UNVERIFIABLE|TRUE|FALSE)\b', r'\1"\2"', text)
     text = re.sub(r",\s*([}\]])", r"\1", text)  # Remove trailing commas
 
     # Clean full array parse first.
@@ -184,7 +189,7 @@ _HIGH_QUALITY = (
     "sciencedirect.com", "nytimes.com",
 )
 
-# Not blocked, but just deranked so it doesn't get in the top priority
+# Not blocked, ranked below explicit high-quality sources but above unrecognized domains
 _MEDIUM_QUALITY = (
     "wikipedia.org",
 )
@@ -201,8 +206,8 @@ def _filter_sources(results: list[dict]) -> list[dict]:
                 return 0
         for domain in _MEDIUM_QUALITY:
             if domain in r["url"]:
-                return 2
-        return 1
+                return 1
+        return 2
 
     results.sort(key=rank)
     return results[:3]
@@ -267,6 +272,14 @@ def _search(query: str, claim_label: str = "", verbose: bool = False) -> tuple[s
 
 def _verify_one(claim: dict, search_text: str, urls: list[str], verbose: bool = False) -> dict | None:
     # One verify call per claim: keeps each verdict paired with its own search results (no positional zip drift) and lets callers reveal results as they land.
+    if not search_text:
+        # No search evidence at all (search failed or returned zero usable sources). Do not
+        # send an empty evidence block to the model - verified live that it will still answer
+        # confidently from its own training knowledge and fabricate source URLs that were
+        # never actually retrieved. Raise instead of guessing; the caller's existing per-claim
+        # error handling drops this claim from the results rather than showing a fake verdict.
+        raise NoEvidenceError(f"no search evidence for claim: {claim['claim'][:60]!r}")
+
     context = (f"SPEAKER: {claim.get('speaker', 'UNKNOWN')}\n"
                f"CLAIM: {claim['claim']}\n"
                f"SEARCH RESULTS:\n{search_text}\n")
@@ -275,7 +288,16 @@ def _verify_one(claim: dict, search_text: str, urls: list[str], verbose: bool = 
         print(f"[v] DeepInfra verify -> {claim['claim'][:60]!r}")
     raw_reply = _chat(VERIFY_PROMPT, context, max_tokens=600)
     if verbose:
-        print(f"[v] DeepInfra verify done in {time.perf_counter() - start:.2f}s -> {claim['claim'][:60]!r}")
+        # One print() call, not several: this claim's verify runs in its own worker thread
+        # alongside every other claim's, so bundling done-time + raw text into a single write
+        # keeps concurrent claims' raw output from interleaving into a garbled mess on screen.
+        lines = [
+            f"[v] DeepInfra verify done in {time.perf_counter() - start:.2f}s -> {claim['claim'][:60]!r}",
+            f"[v] --- RAW RESPONSE (verify: {claim['claim'][:60]!r}) ---",
+            raw_reply,
+            "[v] --- END RAW RESPONSE ---",
+        ]
+        print("\n".join(lines))
 
     parsed = []
     for v in _parse_json_array(raw_reply):
@@ -310,7 +332,7 @@ def fact_check(transcript: str, on_result=None, verbose=False) -> list[dict]:
             print(msg)
     try:
         if not transcript or len(transcript.strip()) < 10:
-            note("Input too short to fact-check, give more setences too fact-check")
+            note("Input too short to fact-check, give more sentences to fact-check")
             return []
 
         try:
@@ -318,7 +340,13 @@ def fact_check(transcript: str, on_result=None, verbose=False) -> list[dict]:
             if verbose:
                 print("[v] DeepInfra extract -> starting")
                 raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=4000)
-                print(f"[v] DeepInfra extract done in {time.perf_counter() - start:.2f}s")
+                lines = [
+                    f"[v] DeepInfra extract done in {time.perf_counter() - start:.2f}s",
+                    "[v] --- RAW RESPONSE (extract) ---",
+                    raw,
+                    "[v] --- END RAW RESPONSE ---",
+                ]
+                print("\n".join(lines))
             else:
                 with _loading("Extracting claims (Llama 3.3 70B via DeepInfra)"):
                     raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=4000)
@@ -347,7 +375,11 @@ def fact_check(transcript: str, on_result=None, verbose=False) -> list[dict]:
 
                     results = []
                     for f in search_futures:
-                        results.append(f.result())
+                        try:
+                            results.append(f.result())
+                        except Exception as e:
+                            print(f"[ERROR] Search: {type(e).__name__}: {e}")
+                            results.append(("", []))
                     return results
 
             if verbose:
@@ -403,6 +435,8 @@ if __name__ == "__main__":
     truncated = ('[{"claim":"a","verdict":TRUE,"sources":["u1"]},'
                  '{"claim":"b","verdict":FALSE,"sources":["u2"]},'
                  '{"claim":"c","verdict":')                                   # cut off mid-output
+    explanation_colon = ('[{"claim":"a","verdict":TRUE,"confidence":90,'
+                          '"explanation":"Critics say the verdict is: FALSE, but evidence supports TRUE overall."}]')
 
     assert len(_parse_json_array(clean)) == 2, "clean"
     assert len(_parse_json_array(bare_enum)) == 1, "bare enum"
@@ -411,18 +445,31 @@ if __name__ == "__main__":
     assert len(_parse_json_array(trailing)) == 1, "trailing comma"
     assert len(_parse_json_array(truncated)) == 2, "truncated keeps complete objects"
     assert _parse_json_array("not json at all") == [], "garbage"
+    assert len(_parse_json_array(explanation_colon)) == 1, "colon inside explanation must not corrupt JSON"
+    assert _parse_json_array(explanation_colon)[0]["verdict"] == "TRUE", "verdict still quoted correctly"
 
-    # Source ranking: high-quality first, medium-quality (Wikipedia) last, everything
-    # else keeps its original (Tavily-given) relative order in between.
+    # Source ranking: high-quality first, Wikipedia second (above unrecognized domains,
+    # below explicit high-quality ones), everything else keeps its original (Tavily-given)
+    # relative order last.
     mixed = [{"url": "https://en.wikipedia.org/a"}, {"url": "https://some-blog.com/b"},
              {"url": "https://reuters.com/c"}, {"url": "https://other-blog.com/d"}]
     ranked = _filter_sources(mixed)
     ranked_urls = []
     for r in ranked:
         ranked_urls.append(r["url"])
-    assert ranked_urls == ["https://reuters.com/c", "https://some-blog.com/b",
-                           "https://other-blog.com/d"], "high-quality first, wikipedia last, order preserved within tiers"
+    assert ranked_urls == ["https://reuters.com/c", "https://en.wikipedia.org/a",
+                           "https://some-blog.com/b"], "high-quality first, wikipedia above unranked domains, order preserved within tiers"
     assert len(ranked) <= 3, "caps at 3 sources"
+
+    # Empty search evidence must raise NoEvidenceError before ever calling the LLM (real bug
+    # found live: with search failing entirely, the model answered from its own training
+    # knowledge and fabricated citations instead of admitting no evidence was found).
+    raised_no_evidence = False
+    try:
+        _verify_one({"claim": "Earth is square", "speaker": "X"}, "", [])
+    except NoEvidenceError:
+        raised_no_evidence = True
+    assert raised_no_evidence, "empty search evidence must raise NoEvidenceError"
 
     print("OK: all self-checks pass")
     
