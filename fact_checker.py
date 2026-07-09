@@ -194,8 +194,7 @@ _MEDIUM_QUALITY = (
     "wikipedia.org",
 )
 
-# Tavily's own relevance score per result, 0-1. Below this, results tend to be
-# off-topic or thin (song lyrics, wrong-year pages) rather than just low-quality domains.
+# Tavily's own relevance score per result, 0-1. Below this, results tend to be off-topic or thin (song lyrics, wrong-year pages) rather than just low-quality domains.
 _MIN_SCORE = 0.3
 
 def _filter_sources(results: list[dict]) -> list[dict]:
@@ -461,9 +460,7 @@ if __name__ == "__main__":
                            "https://some-blog.com/b"], "high-quality first, wikipedia above unranked domains, order preserved within tiers"
     assert len(ranked) <= 3, "caps at 3 sources"
 
-    # Empty search evidence must raise NoEvidenceError before ever calling the LLM (real bug
-    # found live: with search failing entirely, the model answered from its own training
-    # knowledge and fabricated citations instead of admitting no evidence was found).
+    # Empty search evidence must raise NoEvidenceError before ever calling the LLM (real bug found live: with search failing entirely, the model answered from its own training knowledge and fabricated citations instead of admitting no evidence was found).
     raised_no_evidence = False
     try:
         _verify_one({"claim": "Earth is square", "speaker": "X"}, "", [])

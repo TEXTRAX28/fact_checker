@@ -44,11 +44,13 @@ tempCodeRunnerFile.py
 
 # Project docs
 CLAUDE.md
+.claude/
 STATUS.md
 HANDOFF.md
 system_prompt.md
 NOTES.md
 ARCHITECTURE.md
+feature#1.md
 
 # graphify 
 graphify-out/

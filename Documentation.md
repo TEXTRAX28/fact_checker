@@ -496,7 +496,7 @@ The model did not say "I have no evidence." It answered from its own
 training knowledge instead, at full confidence, and **invented source URLs**
 that were never actually fetched by anything.
 
-### Real Example: Before Fix
+### Before Fix
 
 ```
 > 4
@@ -570,7 +570,7 @@ Searching Tavily for evidence...[ERROR] Search: InvalidAPIKeyError: Unauthorized
 Verifying 2 claim(s) (Llama 3.3 70B via DeepInfra)...
 ```
 
-No verdict blocks are printed. Both claims are correctly dropped - zero
+No verdict blocks are printed. Both claims are correctly dropped, zero
 fabricated citations, zero false confidence.
 
 ### Raw-Response Verbose Logging
