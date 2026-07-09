@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import re
 import sys
@@ -207,7 +207,7 @@ def _parse_json_array(text: str) -> list:
 _LOW_QUALITY = (
     "facebook.com", "youtube.com", "youtu.be", "twitter.com", "x.com",
     "instagram.com", "tiktok.com", "reddit.com", "quora.com",
-    "pinterest.com", "threads.net", "medium.com",
+    "pinterest.com", "threads.net", "medium.com", "linkedin,com",
 )
 
 _HIGH_QUALITY = (
