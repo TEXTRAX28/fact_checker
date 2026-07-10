@@ -192,7 +192,8 @@ the model consistently following that instruction:
 - `_filter_sources()` now explicitly sorts results into three tiers:
   official/high-quality domains first (`_HIGH_QUALITY`: Reuters, AP, BBC,
   .gov, WHO, World Bank, UN, IMF, Nature, ScienceDirect, NYT), Wikipedia
-  demoted last (`_MEDIUM_QUALITY`), everything else in between.
+  ranked second (`_MEDIUM_QUALITY`, above unrecognized domains but below
+  explicit high-quality ones), everything else last.
 
 The prompt-level fix documented above and the code-level fix are
 complementary, not conflicting: the prompt guides the model's own source
@@ -455,6 +456,12 @@ Verifying 10 claim(s) (Llama 3.3 70B via DeepInfra)...
     = https://bpkh.go.id
     = https://eprints.walisongo.ac.id/19845/1/1901056029_Masiran_Full%20Skripsi%20-%20Masiran%20smart1.pdf
 ```
+
+Note: several `Why:` lines in the block above are still in English despite the
+claim text being Indonesian (e.g. "Sources from antaranews.com and other sites
+confirm..."). The language-matching prompt change reduced mixing but did not
+fully remove it, this sample is left as an honest "after" capture, not
+cleaned up to look more finished than it is.
 
 During testing, another issue was identified in the article extraction stage. Although Jina Reader successfully retrieved the article, the extracted content still contained a significant amount of non-article text. Elements such as navigation menus, headers, footers, related article sections, and other page components were included alongside the main article body.
 

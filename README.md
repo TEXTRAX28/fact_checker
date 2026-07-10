@@ -103,7 +103,7 @@ flowchart TD
 - **Entity-aware search queries:** Claim extraction includes the specific named person/company/organization in the search query so primary sources surface over generic aggregator sites
 - **Fallback chain:** If a page is thin or blocked, try archive then search, gated on real cleaned content, not byte count
 - **Parallel within each phase:** All claims are searched concurrently, then all claims are verified concurrently, for speed
-- **Robust JSON parsing:** Recovers verdicts even when the model returns malformed or truncated JSON (incl. multi-word bare enums)
+- **Robust JSON parsing:** Recovers verdicts even when the model returns malformed or truncated JSON (incl. unquoted bare enums)
 
 ---
 

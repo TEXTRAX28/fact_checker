@@ -224,26 +224,34 @@ _MEDIUM_QUALITY = (
 # Tavily's own relevance score per result, 0-1. Below this, results tend to be off-topic or thin (song lyrics, wrong-year pages) rather than just low-quality domains.
 _MIN_SCORE = 0.3
 
-def _filter_sources(results: list[dict]) -> list[dict]:
-    # Social/UGC domains are already excluded upstream via Tavily's exclude_domains. Checks for the high and medium quality
-    def rank(r):
-        for domain in _HIGH_QUALITY:
-            if domain in r["url"]:
-                return 0
-        for domain in _MEDIUM_QUALITY:
-            if domain in r["url"]:
-                return 1
-        return 2
-
-    results.sort(key=rank)
-    return results[:3]
-
 def _domain(url: str) -> str:
     from urllib.parse import urlparse
     netloc = urlparse(url).netloc
     if netloc.startswith("www."):
         netloc = netloc[4:]
     return netloc
+
+def _domain_matches(netloc: str, domain: str) -> bool:
+    # Matches the real host, not a substring anywhere in the URL - a query param
+    # like "?ref=reuters.com" on a spam domain must NOT count as reuters.com.
+    if domain.startswith("."):
+        return netloc.endswith(domain)
+    return netloc == domain or netloc.endswith("." + domain)
+
+def _filter_sources(results: list[dict]) -> list[dict]:
+    # Social/UGC domains are already excluded upstream via Tavily's exclude_domains. Checks for the high and medium quality
+    def rank(r):
+        netloc = _domain(r["url"])
+        for domain in _HIGH_QUALITY:
+            if _domain_matches(netloc, domain):
+                return 0
+        for domain in _MEDIUM_QUALITY:
+            if _domain_matches(netloc, domain):
+                return 1
+        return 2
+
+    results.sort(key=rank)
+    return results[:3]
 
 def _score(r: dict) -> float:
     return r.get("score", 0)
@@ -352,10 +360,9 @@ def _verify_one(claim: dict, search_text: str, urls: list[str], verbose: bool = 
 
 def fact_check(transcript: str, on_result=None, verbose=False) -> list[dict]:
     # on_result(verdict) is called for each verdict as it's revealed, in claim order, so callers can print results one by one instead of waiting for all.
-    # verbose=True prints a specific reason when nothing comes back, so the caller can tell "too short" from "no claims" from "couldn't verify any".
+    # note() always prints, so the caller can tell "too short" from "no claims" from "couldn't verify any" even without -v; verbose only gates the extra [v] network-trace logs, not these user-facing status lines.
     def note(msg: str):
-        if verbose:
-            print(msg)
+        print(msg)
     try:
         if not transcript or len(transcript.strip()) < 10:
             note("Input too short to fact-check, give more sentences to fact-check")
@@ -379,7 +386,7 @@ def fact_check(transcript: str, on_result=None, verbose=False) -> list[dict]:
 
             claims = []
             for c in _parse_json_array(raw):
-                if isinstance(c, dict) and c.get("claim"):
+                if isinstance(c, dict) and c.get("claim") and c.get("query"):
                     claims.append(c)
 
             if not claims:
@@ -486,6 +493,13 @@ if __name__ == "__main__":
     assert ranked_urls == ["https://reuters.com/c", "https://en.wikipedia.org/a",
                            "https://some-blog.com/b"], "high-quality first, wikipedia above unranked domains, order preserved within tiers"
     assert len(ranked) <= 3, "caps at 3 sources"
+
+    # rank() must match the real host, not any substring in the URL - a spam domain
+    # stuffing a trusted name into a query param must not be ranked as high-quality
+    # (real bug: "domain in r['url']" matched "reuters.com" inside a ?ref= param).
+    spoofed = [{"url": "https://spam.com/?ref=reuters.com"}, {"url": "https://reuters.com/real"}]
+    ranked_spoofed = _filter_sources(spoofed)
+    assert ranked_spoofed[0]["url"] == "https://reuters.com/real", "real host must outrank a spoofed query param"
 
     # Empty search evidence must raise NoEvidenceError before ever calling the LLM (real bug found live: with search failing entirely, the model answered from its own training knowledge and fabricated citations instead of admitting no evidence was found).
     raised_no_evidence = False
