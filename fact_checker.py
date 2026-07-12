@@ -207,7 +207,7 @@ def _parse_json_array(text: str) -> list:
 _LOW_QUALITY = (
     "facebook.com", "youtube.com", "youtu.be", "twitter.com", "x.com",
     "instagram.com", "tiktok.com", "reddit.com", "quora.com",
-    "pinterest.com", "threads.net", "medium.com", "linkedin,com",
+    "pinterest.com", "threads.net", "medium.com", "linkedin.com",
 )
 
 _HIGH_QUALITY = (
@@ -335,7 +335,7 @@ def _verify_one(claim: dict, search_text: str, urls: list[str], verbose: bool = 
 
     parsed = []
     for v in _parse_json_array(raw_reply):
-        if isinstance(v, dict) and v.get("verdict"):
+        if isinstance(v, dict) and "supported" in v and "contradicted" in v:
             parsed.append(v)
 
     if not parsed:
@@ -347,6 +347,7 @@ def _verify_one(claim: dict, search_text: str, urls: list[str], verbose: bool = 
     # Deterministic verdict: derived from supported/contradicted rather than trusting the
     # model's own "verdict" field, closes the "no evidence found -> FALSE" failure mode
     # at the code level instead of just asking the model not to do it.
+    model_verdict = str(verdict.get("verdict", "")).upper()
     supported = bool(verdict.get("supported"))
     contradicted = bool(verdict.get("contradicted"))
     if supported and not contradicted:
@@ -355,6 +356,12 @@ def _verify_one(claim: dict, search_text: str, urls: list[str], verbose: bool = 
         verdict["verdict"] = "FALSE"
     else:
         verdict["verdict"] = "UNVERIFIABLE"
+
+    # The model's explanation was written to justify model_verdict, not necessarily the recomputed one. If we overrode it, say so, otherwise the label and explanation can
+    # read as contradicting each other (e.g. "[TRUE] Why: no direct evidence found").
+    if model_verdict and model_verdict != verdict["verdict"]:
+        verdict["explanation"] = (verdict.get("explanation", "").rstrip() +
+            f" (Verdict corrected to {verdict['verdict']} from the evidence fields.)")
 
     return verdict
 
