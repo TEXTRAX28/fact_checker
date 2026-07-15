@@ -6,3 +6,8 @@ tavily-python>=0.3.0
 
 # Utilities
 python-dotenv>=1.0.0
+
+# Mode 1: microphone capture, VAD, speech-to-text
+sounddevice>=0.5.0
+webrtcvad-wheels>=2.0.14
+groq>=1.5.0

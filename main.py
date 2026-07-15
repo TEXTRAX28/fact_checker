@@ -5,9 +5,10 @@ from display import show_results
 load_dotenv()
 
 
-# Feature #1: mic (coming soon)
-def run_mic():
-    print("Mode 1 (Microphone) - Coming Soon")
+# Feature #1: mic
+def run_mic(verbose: bool = False):
+    from mic import run_mic as _run_mic
+    _run_mic(verbose)
 
 
 # Feature #2: Live stream (coming soon)
@@ -215,7 +216,7 @@ def main():
 
     try:
         if choice == "1":
-            run_mic()
+            run_mic(args.verbose)
         elif choice == "2":
             run_stream()
         elif choice == "3":
