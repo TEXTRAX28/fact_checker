@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Fact Check</title>
+    <link rel="stylesheet" href="sidepanel.css">
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-mark" data-icon="shield-check" data-icon-size="20"></span>
+        <span>Fact Check</span>
+      </div>
+      <button id="backend-status" class="backend-status" type="button" title="Check backend connection">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span class="backend-label">Connecting</span>
+      </button>
+    </header>
+
+    <main>
+      <section class="source-section" aria-labelledby="source-heading">
+        <h1 id="source-heading" class="section-title">Source</h1>
+        <div id="mode-control" class="mode-control" role="tablist" aria-label="Check source">
+          <button id="mode-page" class="mode-button" type="button" role="tab" aria-selected="true" data-mode="page">
+            <span data-icon="file-text"></span><span>Current Page</span>
+          </button>
+          <button id="mode-url" class="mode-button" type="button" role="tab" aria-selected="false" data-mode="url">
+            <span data-icon="link"></span><span>Paste URL</span>
+          </button>
+          <button id="mode-text" class="mode-button" type="button" role="tab" aria-selected="false" data-mode="text">
+            <span data-icon="align-left"></span><span>Paste Text</span>
+          </button>
+        </div>
+
+        <div id="input-panel" class="input-panel"></div>
+        <p id="input-error" class="field-error" role="alert" hidden></p>
+
+        <button id="primary-action" class="primary-action" type="button" disabled>
+          <span class="button-icon" data-icon="search"></span>
+          <span class="button-label">Check claims</span>
+        </button>
+      </section>
+
+      <section id="progress-section" class="progress-section" aria-labelledby="progress-heading" hidden>
+        <div class="section-heading-row">
+          <h2 id="progress-heading" class="section-title">Progress</h2>
+          <span id="progress-count" class="count-label"></span>
+        </div>
+        <div class="status-summary">
+          <span id="status-icon" class="status-summary-icon" data-icon="search"></span>
+          <div>
+            <h3 id="status-title">Ready to check</h3>
+            <p id="status-detail">Choose a source and start a check.</p>
+          </div>
+        </div>
+        <ol id="stage-list" class="stage-list" aria-label="Check stages"></ol>
+        <div id="job-errors" class="job-errors" hidden></div>
+      </section>
+
+      <section id="results-section" class="results-section" aria-labelledby="results-heading" hidden>
+        <div class="section-heading-row">
+          <h2 id="results-heading" class="section-title">Claims</h2>
+          <span id="results-count" class="count-label"></span>
+        </div>
+        <div id="results-list" class="results-list"></div>
+      </section>
+    </main>
+
+    <div id="live-status" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>

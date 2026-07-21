@@ -1,11 +1,23 @@
 ﻿import json
+import copy
 import os
 import re
 import sys
 import threading
 import time
 from contextlib import contextmanager
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+
+SEARCH_WORKERS = 4
+VERIFY_WORKERS = 3
+MAX_CLAIMS = 15
+MIN_INPUT_NON_WHITESPACE = 10
+DEEPINFRA_TIMEOUT_SECONDS = 30.0
+TAVILY_TIMEOUT_SECONDS = 15.0
+PROVIDER_MAX_RETRIES = 2
+MAX_EVIDENCE_PER_SOURCE_CHARS = 4_000
+MAX_EVIDENCE_TOTAL_CHARS = 10_000
+VERIFY_BACKLOG_MULTIPLIER = 2
 
 @contextmanager
 def _loading(message: str):
@@ -35,6 +47,69 @@ def _loading(message: str):
 class NoEvidenceError(Exception):
     # Raised when a claim has zero search evidence to verify against (search failed or returned nothing usable). 
     pass
+
+
+class ProviderProtocolError(Exception):
+    """Raised when provider output does not satisfy the expected JSON protocol."""
+
+
+class FactCheckResult(list):
+    """List-compatible pipeline result with enough metadata for service adapters."""
+
+    def __init__(self, values=(), *, status: str = "completed", claim_count: int = 0,
+                 errors: list[dict] | None = None):
+        super().__init__(values)
+        self.status = status
+        self.claim_count = claim_count
+        self.errors = errors or []
+
+
+def _safe_callback(callback, value, label: str) -> None:
+    if callback is None:
+        return
+    try:
+        callback(copy.deepcopy(value))
+    except Exception as exc:
+        print(f"[ERROR] {label} callback: {type(exc).__name__}: {exc}")
+
+
+def _is_timeout(exc: Exception) -> bool:
+    return isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower()
+
+
+def _status_code(exc: Exception) -> int | None:
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) or getattr(exc, "status_code", None)
+
+
+def _is_rate_limited(exc: Exception) -> bool:
+    return (_status_code(exc) == 429
+            or type(exc).__name__ in {
+                "RateLimitError", "UsageLimitExceededError", "TavilyKeylessLimitError"
+            })
+
+
+def _is_retryable(exc: Exception) -> bool:
+    status_code = _status_code(exc)
+    return (_is_timeout(exc) or _is_rate_limited(exc)
+            or status_code in {408, 409}
+            or (status_code is not None and status_code >= 500))
+
+
+def _public_provider_error(stage: str, exc: Exception,
+                           claim_index: int | None = None) -> dict:
+    if _is_rate_limited(exc):
+        code, message = "provider_rate_limited", "A provider rate limit was reached."
+    elif _is_timeout(exc):
+        code, message = "provider_timeout", "A provider request timed out."
+    elif isinstance(exc, ProviderProtocolError):
+        code, message = "provider_protocol_error", "A provider returned malformed output."
+    else:
+        code, message = "provider_error", "A provider request failed."
+    error = {"stage": stage, "code": code, "message": message}
+    if claim_index is not None:
+        error["claim_index"] = claim_index
+    return error
 
 # DeepInfra API (OpenAI-compatible)
 _deepinfra_client = None
@@ -151,7 +226,9 @@ def _deepinfra_():
         from openai import OpenAI
         _deepinfra_client = OpenAI(
             api_key=os.getenv("DEEPINFRA_API_KEY"),
-            base_url=DEEPINFRA_BASE_URL
+            base_url=DEEPINFRA_BASE_URL,
+            timeout=DEEPINFRA_TIMEOUT_SECONDS,
+            max_retries=PROVIDER_MAX_RETRIES,
         )
     return _deepinfra_client
 
@@ -171,13 +248,14 @@ def _chat(system: str, user: str, max_tokens: int) -> str:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
+            timeout=DEEPINFRA_TIMEOUT_SECONDS,
         )
         return response.choices[0].message.content or ""
     except Exception as e:
         print(f"[ERROR] DeepInfra: {type(e).__name__}: {e}")
         raise
 
-def _parse_json_array(text: str) -> list:
+def _parse_provider_array(text: str) -> tuple[list, bool]:
     text = re.sub(r"```(?:json)?\n?|```", "", text)
     # quote bare enums (e.g. "verdict": TRUE -> "verdict": "TRUE"). Anchored to the "verdict" key specifically, not just any ": TRUE"/": FALSE" otherwise a colon inside an explanation string gets corrupted too.
     text = re.sub(r'("verdict"\s*:\s*)(UNVERIFIABLE|TRUE|FALSE)\b', r'\1"\2"', text)
@@ -189,7 +267,7 @@ def _parse_json_array(text: str) -> list:
         try:
             parsed = json.loads(match.group())
             if isinstance(parsed, list):
-                return parsed
+                return parsed, True
         except json.JSONDecodeError:
             pass
 
@@ -202,7 +280,11 @@ def _parse_json_array(text: str) -> list:
                 objects.append(obj)
         except json.JSONDecodeError:
             continue
-    return objects
+    return objects, bool(objects)
+
+
+def _parse_json_array(text: str) -> list:
+    return _parse_provider_array(text)[0]
 
 _LOW_QUALITY = (
     "facebook.com", "youtube.com", "youtu.be", "twitter.com", "x.com",
@@ -259,7 +341,23 @@ def _score(r: dict) -> float:
 def _search(query: str, claim_label: str = "", verbose: bool = False) -> tuple[str, list[str]]:
     # Low-quality/UGC domains excluded at the Tavily, not filtered after the fact check.
     start = time.perf_counter()
-    raw_results = _tavily_().search(query, max_results=10, exclude_domains=list(_LOW_QUALITY), search_depth="advanced").get("results", [])
+    for attempt in range(PROVIDER_MAX_RETRIES + 1):
+        try:
+            response = _tavily_().search(
+                query,
+                max_results=10,
+                exclude_domains=list(_LOW_QUALITY),
+                search_depth="advanced",
+                include_raw_content="markdown",
+                timeout=TAVILY_TIMEOUT_SECONDS,
+            )
+            break
+        except Exception as exc:
+            print(f"[ERROR] Tavily attempt {attempt + 1}: {type(exc).__name__}: {exc}")
+            if attempt >= PROVIDER_MAX_RETRIES or not _is_retryable(exc):
+                raise
+            time.sleep(0.1 * (attempt + 1))
+    raw_results = response.get("results", [])
 
     passed = []
     for r in raw_results:
@@ -297,9 +395,24 @@ def _search(query: str, claim_label: str = "", verbose: bool = False) -> tuple[s
 
     urls = []
     text_parts = []
+    evidence_size = 0
     for r in accepted:
-        urls.append(r["url"])
-        text_parts.append(f"[{r['url']}]\n{r['content'][:600]}")
+        url = r["url"]
+        raw_content = r.get("raw_content")
+        body = (raw_content if isinstance(raw_content, str) and raw_content.strip()
+                else r.get("content", ""))
+        if not isinstance(body, str) or not body.strip():
+            continue
+        header = f"[{url}]\n"
+        separator_size = 2 if text_parts else 0
+        remaining = (MAX_EVIDENCE_TOTAL_CHARS - evidence_size
+                     - separator_size - len(header))
+        if remaining <= 0:
+            break
+        excerpt = body[:min(MAX_EVIDENCE_PER_SOURCE_CHARS, remaining)]
+        urls.append(url)
+        text_parts.append(header + excerpt)
+        evidence_size += separator_size + len(header) + len(excerpt)
 
     text = "\n\n".join(text_parts)
     return text, urls
@@ -333,12 +446,18 @@ def _verify_one(claim: dict, search_text: str, urls: list[str], verbose: bool = 
         ]
         print("\n".join(lines))
 
+    raw_items, protocol_valid = _parse_provider_array(raw_reply)
+    if not protocol_valid:
+        raise ProviderProtocolError("verification response was not a JSON array")
+
     parsed = []
-    for v in _parse_json_array(raw_reply):
+    for v in raw_items:
         if isinstance(v, dict) and "supported" in v and "contradicted" in v:
             parsed.append(v)
 
     if not parsed:
+        if raw_items:
+            raise ProviderProtocolError("verification response omitted required fields")
         return None
     verdict = parsed[0]
     if not verdict.get("sources"):
@@ -365,106 +484,261 @@ def _verify_one(claim: dict, search_text: str, urls: list[str], verbose: bool = 
 
     return verdict
 
-def fact_check(transcript: str, on_result=None, verbose=False) -> list[dict]:
-    # on_result(verdict) is called for each verdict as it's revealed, in claim order, so callers can print results one by one instead of waiting for all.
-    # note() always prints, so the caller can tell "too short" from "no claims" from "couldn't verify any" even without -v; verbose only gates the extra [v] network-trace logs, not these user-facing status lines.
-    def note(msg: str):
-        print(msg)
+def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_progress=None,
+               cancel_event=None, search_workers: int = SEARCH_WORKERS,
+               verify_workers: int = VERIFY_WORKERS) -> FactCheckResult:
+    """Extract, search, and verify claims while retaining the legacy list interface."""
+    errors: list[dict] = []
+
+    def progress(stage: str, **details) -> None:
+        _safe_callback(on_progress, {"stage": stage, **details}, "Progress")
+
+    def cancelled() -> bool:
+        return cancel_event is not None and cancel_event.is_set()
+
+    def finish(status: str, values=(), claim_count: int = 0) -> FactCheckResult:
+        result = FactCheckResult(values, status=status, claim_count=claim_count, errors=errors)
+        progress("complete", status=status, claim_count=claim_count,
+                 completed_count=len(result))
+        return result
+
+    if cancelled():
+        return finish("cancelled")
+    if (not isinstance(transcript, str)
+            or sum(not char.isspace() for char in transcript) < MIN_INPUT_NON_WHITESPACE):
+        print("Input too short to fact-check, give more sentences to fact-check")
+        return finish("invalid_input")
+
+    progress("extracting_claims", state="started")
     try:
-        if not transcript or len(transcript.strip()) < 10:
-            note("Input too short to fact-check, give more sentences to fact-check")
-            return []
-
-        try:
-            start = time.perf_counter()
-            if verbose:
-                print("[v] DeepInfra extract -> starting")
-                raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=4000)
-                lines = [
-                    f"[v] DeepInfra extract done in {time.perf_counter() - start:.2f}s",
-                    "[v] --- RAW RESPONSE (extract) ---",
-                    raw,
-                    "[v] --- END RAW RESPONSE ---",
-                ]
-                print("\n".join(lines))
-            else:
-                with _loading("Extracting claims (Llama 3.3 70B via DeepInfra)"):
-                    raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=4000)
-
-            claims = []
-            for c in _parse_json_array(raw):
-                if isinstance(c, dict) and c.get("claim") and c.get("query"):
-                    claims.append(c)
-
-            if not claims:
-                note("No checkable factual claims found, looks like opinion, prediction, or too vague.")
-                return []
-        except Exception as e:
-            print(f"[ERROR] Extraction: {type(e).__name__}: {e}")
-            return []
-
-        try:
-            print(f"Found {len(claims)} claim(s).")
-
-            def _run_searches():
-                with ThreadPoolExecutor() as pool:
-                    search_futures = []
-                    for i, claim in enumerate(claims, start=1):
-                        claim_label = f"{i}/{len(claims)}"
-                        search_futures.append(pool.submit(_search, claim["query"], claim_label, verbose))
-
-                    results = []
-                    for f in search_futures:
-                        try:
-                            results.append(f.result())
-                        except Exception as e:
-                            print(f"[ERROR] Search: {type(e).__name__}: {e}")
-                            results.append(("", []))
-                    return results
-
-            if verbose:
-                search_results = _run_searches()
-            else:
-                with _loading("Searching Tavily for evidence"):
-                    search_results = _run_searches()
-        except Exception as e:
-            print(f"[ERROR] Search: {type(e).__name__}: {e}")
-            return []
-
-        # Verify each claim concurrently, but reveal in claim order: iterating the futures list front-to-back blocks on #1 first while #2.. finish in the
-        # background, so results appear in order as soon as each is ready.
-        print(f"Verifying {len(claims)} claim(s) (Llama 3.3 70B via DeepInfra)...\n")
-        results: list[dict] = []
-        with ThreadPoolExecutor() as pool:
-            futures = []
-            for claim, search_result in zip(claims, search_results):
-                search_text, urls = search_result
-                futures.append(pool.submit(_verify_one, claim, search_text, urls, verbose))
-
-            error_count = 0
-            for f in futures:
-                try:
-                    verdict = f.result()
-                except Exception as e:
-                    print(f"[ERROR] Verification: {type(e).__name__}: {e}")
-                    error_count += 1
-                    continue
-                if verdict:
-                    results.append(verdict)
-                    if on_result:
-                        on_result(verdict)
-        if not results:
-            note(f"Extracted {len(claims)} claim(s), but none could be verified with enough "
-                 f"confidence, no source clearly confirmed or denied them (confidence < 60).")
+        start = time.perf_counter()
+        if verbose:
+            print("[v] DeepInfra extract -> starting")
+            raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=4000)
+            print("\n".join([
+                f"[v] DeepInfra extract done in {time.perf_counter() - start:.2f}s",
+                "[v] --- RAW RESPONSE (extract) ---",
+                raw,
+                "[v] --- END RAW RESPONSE ---",
+            ]))
         else:
-            low_confidence_dropped = len(claims) - len(results) - error_count
-            if low_confidence_dropped > 0:
-                note(f"{low_confidence_dropped} claim(s) dropped (confidence < 60).")
-        return results
+            with _loading("Extracting claims (Llama 3.3 70B via DeepInfra)"):
+                raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=4000)
+    except Exception as exc:
+        print(f"[ERROR] Extraction: {type(exc).__name__}: {exc}")
+        errors.append(_public_provider_error("extraction", exc))
+        if _is_rate_limited(exc):
+            return finish("rate_limited")
+        return finish("timeout" if _is_timeout(exc) else "failed")
 
-    except Exception as e:
-        print(f"[ERROR] {type(e).__name__}: {e}")
-        return []
+    if cancelled():
+        return finish("cancelled")
+
+    raw_claims, protocol_valid = _parse_provider_array(raw)
+    if not protocol_valid:
+        exc = ProviderProtocolError("extraction response was not a JSON array")
+        errors.append(_public_provider_error("extraction", exc))
+        return finish("failed")
+
+    claims = [
+        claim for claim in raw_claims
+        if isinstance(claim, dict) and claim.get("claim") and claim.get("query")
+    ][:MAX_CLAIMS]
+    if raw_claims and not claims:
+        exc = ProviderProtocolError("extraction response omitted required fields")
+        errors.append(_public_provider_error("extraction", exc))
+        return finish("failed")
+    progress("extracting_claims", state="completed", claim_count=len(claims))
+    if not claims:
+        print("No checkable factual claims found, looks like opinion, prediction, or too vague.")
+        return finish("no_claims")
+
+    print(f"Found {len(claims)} claim(s).")
+    print(f"Verifying {len(claims)} claim(s) (Llama 3.3 70B via DeepInfra)...\n")
+
+    search_limit = max(1, min(int(search_workers), len(claims)))
+    verify_limit = max(1, min(int(verify_workers), len(claims)))
+    verify_backlog_limit = min(
+        len(claims), max(1, VERIFY_BACKLOG_MULTIPLIER * verify_limit)
+    )
+    search_pool = ThreadPoolExecutor(max_workers=search_limit,
+                                     thread_name_prefix="fact-search")
+    verify_pool = ThreadPoolExecutor(max_workers=verify_limit,
+                                     thread_name_prefix="fact-verify")
+    search_futures = {}
+    verify_futures = {}
+    pending_verifications = []
+    next_search = 0
+    results: list[dict] = []
+    no_evidence_count = 0
+    failed_count = 0
+    timeout_count = 0
+    rate_limited_count = 0
+    dropped_count = 0
+    was_cancelled = False
+
+    def record_error(stage: str, claim_index: int, exc: Exception) -> None:
+        nonlocal failed_count, timeout_count, rate_limited_count
+        print(f"[ERROR] {stage.title()}: {type(exc).__name__}: {exc}")
+        errors.append(_public_provider_error(stage, exc, claim_index))
+        if _is_rate_limited(exc):
+            rate_limited_count += 1
+        elif _is_timeout(exc):
+            timeout_count += 1
+        else:
+            failed_count += 1
+
+    def submit_searches() -> None:
+        nonlocal next_search
+        while (not cancelled() and next_search < len(claims)
+               and len(search_futures) < search_limit
+               and (len(search_futures) + len(verify_futures)
+                    + len(pending_verifications)) < verify_backlog_limit):
+            claim_index = next_search
+            claim = claims[claim_index]
+            progress("searching", state="started", claim_index=claim_index,
+                     claim_count=len(claims))
+            future = search_pool.submit(
+                _search, claim["query"], f"{claim_index + 1}/{len(claims)}", verbose
+            )
+            search_futures[future] = claim_index
+            next_search += 1
+
+    def submit_verifications() -> None:
+        while (not cancelled() and pending_verifications
+               and len(verify_futures) < verify_backlog_limit):
+            claim_index, search_text, urls = pending_verifications.pop(0)
+            progress("verifying", state="started", claim_index=claim_index,
+                     claim_count=len(claims))
+            if cancelled():
+                return
+            future = verify_pool.submit(
+                _verify_one, claims[claim_index], search_text, urls, verbose
+            )
+            verify_futures[future] = claim_index
+
+    submit_searches()
+    try:
+        while search_futures or verify_futures or pending_verifications:
+            if cancelled():
+                was_cancelled = True
+                break
+
+            submit_verifications()
+            submit_searches()
+
+            done, _ = wait(
+                set(search_futures) | set(verify_futures),
+                timeout=0.05,
+                return_when=FIRST_COMPLETED,
+            )
+            if not done:
+                continue
+
+            for future in done:
+                if cancelled():
+                    was_cancelled = True
+                    break
+                if future in search_futures:
+                    claim_index = search_futures.pop(future)
+                    progress("searching", state="completed", claim_index=claim_index,
+                             claim_count=len(claims))
+                    if cancelled():
+                        was_cancelled = True
+                        break
+                    try:
+                        search_text, urls = future.result()
+                    except Exception as exc:
+                        if cancelled():
+                            was_cancelled = True
+                            break
+                        record_error("search", claim_index, exc)
+                    else:
+                        if cancelled():
+                            was_cancelled = True
+                            break
+                        if not search_text:
+                            no_evidence_count += 1
+                        else:
+                            pending_verifications.append((claim_index, search_text, urls))
+                            submit_verifications()
+                    submit_searches()
+                    continue
+
+                claim_index = verify_futures.pop(future)
+                progress("verifying", state="completed", claim_index=claim_index,
+                         claim_count=len(claims))
+                if cancelled():
+                    was_cancelled = True
+                    break
+                try:
+                    verdict = future.result()
+                except NoEvidenceError:
+                    if cancelled():
+                        was_cancelled = True
+                        break
+                    no_evidence_count += 1
+                    submit_searches()
+                    continue
+                except Exception as exc:
+                    if cancelled():
+                        was_cancelled = True
+                        break
+                    record_error("verification", claim_index, exc)
+                    submit_searches()
+                    continue
+
+                if cancelled():
+                    was_cancelled = True
+                    break
+                if verdict is None:
+                    dropped_count += 1
+                    submit_searches()
+                    continue
+
+                # Provider output cannot change which extracted claim this future belongs to.
+                verdict["claim"] = claims[claim_index]["claim"]
+                verdict["speaker"] = claims[claim_index].get("speaker", "UNKNOWN")
+                verdict["claim_index"] = claim_index
+                if cancelled():
+                    was_cancelled = True
+                    break
+                results.append(verdict)
+                if not cancelled():
+                    _safe_callback(on_result, verdict, "Result")
+                submit_searches()
+    finally:
+        if was_cancelled or cancelled():
+            was_cancelled = True
+            for future in list(search_futures) + list(verify_futures):
+                future.cancel()
+            pending_verifications.clear()
+            search_pool.shutdown(wait=True, cancel_futures=True)
+            verify_pool.shutdown(wait=True, cancel_futures=True)
+        else:
+            search_pool.shutdown(wait=True, cancel_futures=True)
+            verify_pool.shutdown(wait=True, cancel_futures=True)
+
+    if was_cancelled:
+        return finish("cancelled", results, len(claims))
+    if results and len(results) == len(claims):
+        return finish("completed", results, len(claims))
+    if results:
+        return finish("partial", results, len(claims))
+    if rate_limited_count:
+        return finish("rate_limited", claim_count=len(claims))
+    if timeout_count:
+        return finish("timeout", claim_count=len(claims))
+    if failed_count:
+        return finish("failed", claim_count=len(claims))
+
+    if no_evidence_count + dropped_count == len(claims):
+        if dropped_count:
+            print(f"{dropped_count} claim(s) dropped (confidence < 60).")
+        print(f"Extracted {len(claims)} claim(s), but none could be verified with enough "
+              "evidence, no source clearly confirmed or denied them.")
+        return finish("no_evidence", claim_count=len(claims))
+    return finish("failed", claim_count=len(claims))
 
 if __name__ == "__main__":
     # Self-check: _parse_json_array must survive the malformed JSON the LLM actually emits.
