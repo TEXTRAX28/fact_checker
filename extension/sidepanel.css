@@ -603,12 +603,14 @@ section {
   padding: 10px 0 0;
   border-top: 1px solid var(--border);
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 5px;
   list-style: none;
 }
 
 .source-link {
   min-height: 28px;
+  min-width: 0;
   width: fit-content;
   max-width: 100%;
   display: inline-flex;
