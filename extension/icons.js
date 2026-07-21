@@ -34,6 +34,11 @@ const ICONS = Object.freeze({
     ["path", { d: "M21 3v5h-5" }],
   ],
   square: [["rect", { x: "4", y: "4", width: "16", height: "16", rx: "2" }]],
+  download: [
+    ["path", { d: "M12 15V3" }],
+    ["path", { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }],
+    ["path", { d: "m7 10 5 5 5-5" }],
+  ],
   search: [
     ["circle", { cx: "11", cy: "11", r: "8" }],
     ["path", { d: "m21 21-4.3-4.3" }],

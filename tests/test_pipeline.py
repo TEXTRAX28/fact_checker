@@ -27,6 +27,15 @@ def verdict_for(claim):
     }
 
 
+def one_source(url="https://example.com", content="Evidence text.", **overrides):
+    # The real shape _search() returns as of the source_analysis work - source_index
+    # references in a mocked verify response must line up with this list's order.
+    source = {"url": url, "title": None, "domain": url.split("//")[-1].split("/")[0], "score": 0.9,
+              "content": content, "is_full_content": True}
+    source.update(overrides)
+    return source
+
+
 def test_callback_exceptions_do_not_discard_pipeline_results(monkeypatch):
     monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: extraction_payload(1))
     monkeypatch.setattr(
@@ -374,14 +383,19 @@ def test_tavily_raw_content_is_preferred_and_evidence_is_bounded(monkeypatch):
 
     monkeypatch.setattr(fact_checker, "_tavily_", lambda: FakeTavily())
 
-    text, urls = fact_checker._search("bounded evidence")
+    # _search() now returns structured source dicts, not bare URL strings - source_index
+    # references in VERIFY_PROMPT's source_analysis rely on this list's order matching
+    # the "[N] url" headers in the evidence text exactly.
+    text, sources = fact_checker._search("bounded evidence")
     blocks = text.split("\n\n")
 
     assert captured["include_raw_content"] == "markdown"
     assert captured["timeout"] == fact_checker.TAVILY_TIMEOUT_SECONDS
-    assert urls == [
+    assert [s["url"] for s in sources] == [
         "https://one.example/a", "https://two.example/b", "https://three.example/c"
     ]
+    assert [s["is_full_content"] for s in sources] == [True, False, True], \
+        "raw_content used when present and non-empty; falls back to content only when raw_content is missing"
     assert "SNIPPET_MUST_NOT_APPEAR" not in text
     assert "OTHER_SNIPPET_MUST_NOT_APPEAR" not in text
     assert "FALLBACK_SNIPPET" in text
@@ -390,6 +404,10 @@ def test_tavily_raw_content_is_preferred_and_evidence_is_bounded(monkeypatch):
         len(block.split("\n", 1)[1]) <= fact_checker.MAX_EVIDENCE_PER_SOURCE_CHARS
         for block in blocks
     )
+    # Evidence text is indexed [0], [1], [2]... in the same order as `sources`, so a
+    # model-cited source_index maps back to the correct source unambiguously.
+    for index, block in enumerate(blocks):
+        assert block.startswith(f"[{index}] {sources[index]['url']}\n")
 
 
 def test_tavily_timeout_retries_are_bounded(monkeypatch):
@@ -433,7 +451,7 @@ def test_all_malformed_verification_outputs_fail(monkeypatch):
 
     monkeypatch.setattr(fact_checker, "_chat", chat)
     monkeypatch.setattr(
-        fact_checker, "_search", lambda *_args, **_kwargs: ("evidence", ["https://example.com"])
+        fact_checker, "_search", lambda *_args, **_kwargs: ("evidence", [one_source()])
     )
 
     result = fact_checker.fact_check("A sufficiently long factual sentence.", verbose=True)
@@ -446,7 +464,7 @@ def test_all_malformed_verification_outputs_fail(monkeypatch):
 def test_malformed_verification_with_success_is_partial(monkeypatch):
     monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: extraction_payload(2))
     monkeypatch.setattr(
-        fact_checker, "_search", lambda *_args, **_kwargs: ("evidence", ["https://example.com"])
+        fact_checker, "_search", lambda *_args, **_kwargs: ("evidence", [one_source()])
     )
 
     def verify(claim, *_args, **_kwargs):
@@ -460,6 +478,74 @@ def test_malformed_verification_with_success_is_partial(monkeypatch):
 
     assert result.status == "partial"
     assert [item["claim"] for item in result] == ["claim-0"]
+
+
+def test_verify_one_source_analysis_overrides_inconsistent_model_fields(monkeypatch):
+    # The whole point of source_analysis: the model's own top-level supported/
+    # contradicted must not be trusted if it disagrees with its own per-source
+    # breakdown - Python derives the real values from source_analysis instead.
+    monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: json.dumps([{
+        "claim": "x", "supported": True, "contradicted": False, "verdict": "TRUE",
+        "confidence": 95, "explanation": "looks true",
+        "source_analysis": [
+            {"source_index": 0, "stance": "CONTRADICTS", "directness": "DIRECT",
+             "reason": "source denies it", "evidence_excerpt": "this did not happen"},
+        ],
+    }]))
+    verdict = fact_checker._verify_one(
+        {"claim": "The event happened.", "speaker": "X"},
+        "evidence", [one_source(content="Officials say this did not happen.")],
+    )
+    assert verdict["supported"] is False
+    assert verdict["contradicted"] is True
+    assert verdict["verdict"] == "FALSE", "model said TRUE, but its own source_analysis says CONTRADICTS"
+
+
+def test_verify_one_falls_back_to_top_level_fields_without_source_analysis(monkeypatch):
+    # Graceful degradation: a missing/unusable source_analysis must not fail or
+    # retry the claim - fall back to the model's own supported/contradicted.
+    monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: json.dumps([{
+        "claim": "x", "supported": True, "contradicted": False, "verdict": "TRUE",
+        "confidence": 80, "explanation": "supported",
+    }]))
+    verdict = fact_checker._verify_one(
+        {"claim": "The event happened.", "speaker": "X"},
+        "evidence", [one_source()],
+    )
+    assert verdict["verdict"] == "TRUE"
+    assert verdict["source_analysis"] == []
+
+
+def test_verify_one_caps_confidence_without_direct_evidence(monkeypatch):
+    monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: json.dumps([{
+        "claim": "x", "supported": True, "contradicted": False, "verdict": "TRUE",
+        "confidence": 97, "explanation": "supported",
+        "source_analysis": [
+            {"source_index": 0, "stance": "SUPPORTS", "directness": "INDIRECT",
+             "reason": "generally on topic"},
+        ],
+    }]))
+    verdict = fact_checker._verify_one(
+        {"claim": "The event happened.", "speaker": "X"}, "evidence", [one_source()],
+    )
+    # Confidence is capped silently - no user-facing warning text is produced.
+    assert verdict["confidence"] <= fact_checker._CONFIDENCE_CAP_NO_DIRECT_SOURCE
+    assert "warning" not in verdict
+
+
+def test_verify_one_attaches_source_titles_not_bare_urls(monkeypatch):
+    monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: json.dumps([{
+        "claim": "x", "supported": True, "contradicted": False, "verdict": "TRUE",
+        "confidence": 90, "explanation": "supported",
+        "source_analysis": [{"source_index": 0, "stance": "SUPPORTS", "directness": "DIRECT"}],
+    }]))
+    verdict = fact_checker._verify_one(
+        {"claim": "x", "speaker": "X"}, "evidence",
+        [one_source(url="https://reuters.com/a", title="Tariffs announced")],
+    )
+    assert verdict["sources"] == [{
+        "url": "https://reuters.com/a", "title": "Tariffs announced", "domain": "reuters.com",
+    }]
 
 
 def test_malformed_extraction_is_not_no_claims(monkeypatch):

@@ -318,6 +318,10 @@ section {
   gap: 8px;
 }
 
+#export-actions {
+  margin-bottom: 12px;
+}
+
 .secondary-action {
   min-height: 44px;
   padding: 8px 10px;
@@ -620,12 +624,6 @@ section {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.result-warning {
-  margin: 10px 0 0;
-  color: var(--amber);
-  font-size: 12px;
 }
 
 .claim-placeholder {

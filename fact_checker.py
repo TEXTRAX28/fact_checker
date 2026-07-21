@@ -1,11 +1,15 @@
 ﻿import json
 import copy
+import difflib
+import io
 import os
 import re
+import secrets
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
+from datetime import datetime, timezone
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 SEARCH_WORKERS = 4
@@ -18,6 +22,7 @@ PROVIDER_MAX_RETRIES = 2
 MAX_EVIDENCE_PER_SOURCE_CHARS = 4_000
 MAX_EVIDENCE_TOTAL_CHARS = 10_000
 VERIFY_BACKLOG_MULTIPLIER = 2
+RAW_RESPONSE_LOG_MAX_CHARS = 8_000
 
 @contextmanager
 def _loading(message: str):
@@ -168,7 +173,32 @@ Each object in the array must have:
                  Indonesian -> explanation in Indonesian, claim in English -> explanation in
                  English). Never mix languages within one explanation, regardless of what
                  language the search results/sources are in.
-  "sources": array of URLs from the search results
+  "source_analysis": array with exactly one entry per numbered source shown in SEARCH
+                      RESULTS below. Reference sources ONLY by the [N] index shown there -
+                      never invent an index and never use a URL. Each entry:
+                        "source_index": the [N] number of the source
+                        "stance": one of SUPPORTS / CONTRADICTS / PARTIAL / IRRELEVANT / INSUFFICIENT
+                        "directness": DIRECT if the source addresses the exact entity, number,
+                                      and timeframe in the claim; INDIRECT if only generally related
+                        "reason": one short sentence
+                        "evidence_excerpt": a short exact quote (under 25 words) from that
+                                            source supporting the stance, or null if the
+                                            stance is IRRELEVANT or INSUFFICIENT
+
+SOURCE_ANALYSIS DEFINITIONS:
+  SUPPORTS = this source directly and explicitly confirms the claim.
+  CONTRADICTS = this source directly and explicitly denies or contradicts the claim.
+  PARTIAL = this source confirms only part of a compound or qualified claim, not all of it.
+  IRRELEVANT = this source discusses the same general topic but does not address the
+               claim's specific entity, number, or timeframe - topical relevance alone is
+               never SUPPORTS.
+  INSUFFICIENT = this source might be relevant but lacks enough detail to decide either way.
+
+"supported" and "contradicted" above must be consistent with source_analysis: set
+supported=true only if at least one entry is SUPPORTS, and contradicted=true only if at
+least one entry is CONTRADICTS. These two fields will also be recomputed downstream
+directly from source_analysis, so an inconsistency here will be corrected automatically -
+but make them agree in the first place.
 
 Confidence guidelines:
   95-100 = Two or more independent, high-quality sources (e.g. official government, academic, Reuters, AP, BBC) directly support or directly contradict the claim.
@@ -220,6 +250,36 @@ YOUR ENTIRE RESPONSE MUST BE A VALID JSON ARRAY STARTING WITH [ AND ENDING WITH 
 
 
 # DeepInfra client (OpenAI-compatible)
+def _print_raw_response(*, run_id: str, claim_label: str, provider: str, operation: str,
+                        attempt: int, elapsed: float, body, **extra_fields) -> None:
+    # Terminal-only debug output, gated behind --verbose in main.py's CLI. The API
+    # path never sets verbose=True (not wired into api.py/jobs.py), so this never
+    # reaches the extension - it's strictly a `python main.py -v` / `python
+    # fact_checker.py` terminal aid, not something the frontend can trigger or see.
+    lines = [
+        "=" * 80,
+        "RAW PROVIDER RESPONSE",
+        f"timestamp: {datetime.now(timezone.utc).astimezone().isoformat(timespec='milliseconds')}",
+        f"run_id: {run_id}",
+        f"claim: {claim_label}",
+        f"provider: {provider}",
+        f"operation: {operation}",
+        f"attempt: {attempt}",
+        f"elapsed_seconds: {elapsed:.2f}",
+    ]
+    for key, value in extra_fields.items():
+        lines.append(f"{key}: {value}")
+    lines.append("=" * 80)
+
+    body_text = body if isinstance(body, str) else json.dumps(body, indent=2, default=str)
+    if len(body_text) > RAW_RESPONSE_LOG_MAX_CHARS:
+        omitted = len(body_text) - RAW_RESPONSE_LOG_MAX_CHARS
+        body_text = body_text[:RAW_RESPONSE_LOG_MAX_CHARS] + f"\n...truncated ({omitted} more characters)..."
+    lines.append(body_text)
+    lines.append("=" * 80)
+    print("\n".join(lines))
+
+
 def _deepinfra_():
     global _deepinfra_client
     if _deepinfra_client is None:
@@ -261,25 +321,38 @@ def _parse_provider_array(text: str) -> tuple[list, bool]:
     text = re.sub(r'("verdict"\s*:\s*)(UNVERIFIABLE|TRUE|FALSE)\b', r'\1"\2"', text)
     text = re.sub(r",\s*([}\]])", r"\1", text)  # Remove trailing commas
 
-    # Clean full array parse first.
-    match = re.search(r"\[[\s\S]*\]", text)
-    if match:
+    # Full array parse first, via raw_decode from the first '[' rather than a regex
+    # spanning greedily to the LAST ']' in the text - a stray bracket in trailing
+    # prose after a genuinely complete array must not corrupt an otherwise-good match.
+    decoder = json.JSONDecoder()
+    start = text.find("[")
+    if start != -1:
         try:
-            parsed = json.loads(match.group())
+            parsed, _ = decoder.raw_decode(text, start)
             if isinstance(parsed, list):
                 return parsed, True
         except json.JSONDecodeError:
             pass
 
-    # Fallback: pull complete objects straight from the text. Runs even when the array is truncated mid-output (no closing ]), keeps every complete object.
+    # Fallback: scan for complete top-level objects using the JSON parser itself, not
+    # a `{[^{}]*}` regex - that regex explicitly excludes nested braces, so a claim
+    # or sources value that isn't a plain string (a real, confirmed cause of
+    # ProviderProtocolError, not a guess) silently matched nothing. Runs even when
+    # the array is truncated mid-output (no closing ]); keeps every complete object
+    # found before the cutoff, same as before.
     objects = []
-    for m in re.finditer(r"\{[^{}]*\}", text):
+    pos = 0
+    while pos < len(text):
+        brace = text.find("{", pos)
+        if brace == -1:
+            break
         try:
-            obj = json.loads(m.group())
+            obj, end = decoder.raw_decode(text, brace)
             if isinstance(obj, dict):
                 objects.append(obj)
+            pos = end
         except json.JSONDecodeError:
-            continue
+            pos = brace + 1
     return objects, bool(objects)
 
 
@@ -338,7 +411,7 @@ def _filter_sources(results: list[dict]) -> list[dict]:
 def _score(r: dict) -> float:
     return r.get("score", 0)
 
-def _search(query: str, claim_label: str = "", verbose: bool = False) -> tuple[str, list[str]]:
+def _search(query: str, claim_label: str = "", verbose: bool = False, run_id: str = "") -> tuple[str, list[dict]]:
     # Low-quality/UGC domains excluded at the Tavily, not filtered after the fact check.
     start = time.perf_counter()
     for attempt in range(PROVIDER_MAX_RETRIES + 1):
@@ -380,44 +453,153 @@ def _search(query: str, claim_label: str = "", verbose: bool = False) -> tuple[s
         # One print() call per claim (not one per line): each claim's search runs in its own
         # worker thread, so a block per print() call keeps concurrent claims' output from
         # interleaving line-by-line on screen.
-        lines = []
-        lines.append(f"\nClaim {claim_label}  ({time.perf_counter() - start:.2f}s)")
-        lines.append(f"Retrieved: {len(raw_results)}")
-        lines.append("")
-        lines.append("Accepted")
-        for r in accepted:
-            lines.append(f"{_score(r):.2f} {_domain(r['url'])}")
-        lines.append("")
-        lines.append("Rejected")
-        for r in rejected:
-            lines.append(f"{_score(r):.2f} {_domain(r['url'])}")
-        print("\n".join(lines))
+        _print_raw_response(
+            run_id=run_id, claim_label=claim_label, provider="tavily",
+            operation="evidence_search", attempt=attempt + 1,
+            elapsed=time.perf_counter() - start, body=response,
+            query=query, results_returned=len(raw_results),
+            results_accepted=len(accepted), results_rejected=len(rejected),
+        )
 
-    urls = []
+    # sources[i] and the "[i] ..." block in the evidence text refer to the same
+    # source by construction - this index (not the URL) is what the model is
+    # asked to cite in source_analysis, so a malformed/truncated URL in the
+    # model's output can never misattribute an analysis to the wrong source.
+    sources = []
     text_parts = []
     evidence_size = 0
     for r in accepted:
         url = r["url"]
         raw_content = r.get("raw_content")
-        body = (raw_content if isinstance(raw_content, str) and raw_content.strip()
-                else r.get("content", ""))
+        is_full_content = isinstance(raw_content, str) and bool(raw_content.strip())
+        body = raw_content if is_full_content else r.get("content", "")
         if not isinstance(body, str) or not body.strip():
             continue
-        header = f"[{url}]\n"
+        index = len(sources)
+        header = f"[{index}] {url}\n"
         separator_size = 2 if text_parts else 0
         remaining = (MAX_EVIDENCE_TOTAL_CHARS - evidence_size
                      - separator_size - len(header))
         if remaining <= 0:
             break
         excerpt = body[:min(MAX_EVIDENCE_PER_SOURCE_CHARS, remaining)]
-        urls.append(url)
+        sources.append({
+            "url": url,
+            "title": r.get("title") or None,
+            "domain": _domain(url),
+            "score": _score(r),
+            "content": excerpt,
+            "is_full_content": is_full_content,
+        })
         text_parts.append(header + excerpt)
         evidence_size += separator_size + len(header) + len(excerpt)
 
     text = "\n\n".join(text_parts)
-    return text, urls
+    return text, sources
 
-def _verify_one(claim: dict, search_text: str, urls: list[str], verbose: bool = False) -> dict | None:
+_VALID_STANCES = {"SUPPORTS", "CONTRADICTS", "PARTIAL", "IRRELEVANT", "INSUFFICIENT"}
+_VALID_DIRECTNESS = {"DIRECT", "INDIRECT"}
+
+# Confidence ceilings below are deliberately simple, named constants (not a weighted
+# formula) - each one is a cap, not a deduction, and callers combine them with min().
+_CONFIDENCE_CAP_NO_DIRECT_SOURCE = 75
+_CONFIDENCE_CAP_SINGLE_SUPPORT = 85
+_CONFIDENCE_CAP_UNRESOLVED_CONTRADICTION = 70
+_CONFIDENCE_CAP_SNIPPETS_ONLY = 85
+
+_DUPLICATE_CONTENT_THRESHOLD = 0.85
+
+
+def _validate_source_analysis(entries, source_count: int) -> list[dict]:
+    # Drops malformed entries rather than failing the whole claim or spending a retry -
+    # a partially-malformed source_analysis is still useful signal, and retrying costs
+    # a real DeepInfra call for something usually recoverable.
+    valid = []
+    if not isinstance(entries, list):
+        return valid
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        index = entry.get("source_index")
+        if not isinstance(index, int) or not (0 <= index < source_count):
+            continue
+        stance = str(entry.get("stance", "")).upper()
+        if stance not in _VALID_STANCES:
+            continue
+        directness = str(entry.get("directness", "")).upper()
+        if directness not in _VALID_DIRECTNESS:
+            directness = "INDIRECT"  # safe default rather than dropping an otherwise-valid entry
+        excerpt = entry.get("evidence_excerpt")
+        valid.append({
+            "source_index": index,
+            "stance": stance,
+            "directness": directness,
+            "reason": str(entry.get("reason", ""))[:300],
+            "evidence_excerpt": excerpt if isinstance(excerpt, str) and excerpt.strip() else None,
+        })
+    return valid
+
+
+def _aggregate_stance(source_analysis: list[dict]) -> tuple[bool, bool]:
+    # This is what makes source_analysis authoritative rather than decorative: supported/
+    # contradicted are derived from the validated per-source stances, not trusted from the
+    # model's own top-level fields - the same "recompute, don't trust" pattern already used
+    # one level up for the final TRUE/FALSE/UNVERIFIABLE verdict.
+    supported = any(entry["stance"] == "SUPPORTS" for entry in source_analysis)
+    contradicted = any(entry["stance"] == "CONTRADICTS" for entry in source_analysis)
+    return supported, contradicted
+
+
+def _verify_evidence_excerpt(excerpt: str | None, source_content: str) -> bool:
+    # Soft hallucination signal, not proof: a false result means the excerpt doesn't
+    # appear verbatim (after whitespace normalization) in what was actually retrieved -
+    # models often paraphrase even when asked to quote, so this is a warning input,
+    # never grounds to discard a stance outright.
+    if not excerpt or not source_content:
+        return False
+    normalize = lambda s: re.sub(r"\s+", " ", s).strip().lower()
+    return normalize(excerpt) in normalize(source_content)
+
+
+def _group_duplicate_sources(sources: list[dict]) -> list[int]:
+    # Returns, per source, the index of the first source in its near-duplicate group
+    # (itself, if it's first) - groups syndicated/wire-service copies so they don't
+    # each count as independent confirmation, without hiding either URL from the
+    # user-facing source list. Pure stdlib (difflib), no new dependency.
+    group_of = list(range(len(sources)))
+    for i in range(len(sources)):
+        for j in range(i):
+            if group_of[j] != j:
+                continue  # only compare against each group's representative
+            similarity = difflib.SequenceMatcher(
+                None, sources[i].get("content", ""), sources[j].get("content", "")
+            ).ratio()
+            if similarity >= _DUPLICATE_CONTENT_THRESHOLD:
+                group_of[i] = j
+                break
+    return group_of
+
+
+def _cap_confidence(confidence: int, *, independent_supports: int, has_contradiction: bool,
+                     any_direct: bool, all_snippets: bool) -> int:
+    # Ceilings, not deductions: each condition caps the model's own number rather than
+    # discarding the result. A single weak signal shouldn't fail a claim outright. Silent
+    # by design - no user-facing explanation string is produced; regular users found the
+    # warning text more confusing than useful, so only the calibrated number is kept.
+    cap = 100
+    if not any_direct:
+        cap = min(cap, _CONFIDENCE_CAP_NO_DIRECT_SOURCE)
+    if independent_supports <= 1:
+        cap = min(cap, _CONFIDENCE_CAP_SINGLE_SUPPORT)
+    if has_contradiction:
+        cap = min(cap, _CONFIDENCE_CAP_UNRESOLVED_CONTRADICTION)
+    if all_snippets:
+        cap = min(cap, _CONFIDENCE_CAP_SNIPPETS_ONLY)
+    return min(int(confidence), cap)
+
+
+def _verify_one(claim: dict, search_text: str, sources: list[dict], verbose: bool = False,
+                 claim_label: str = "", run_id: str = "") -> dict | None:
     # One verify call per claim: keeps each verdict paired with its own search results (no positional zip drift) and lets callers reveal results as they land.
     if not search_text:
         # No search evidence at all (search failed or returned zero usable sources). Do not
@@ -431,23 +613,25 @@ def _verify_one(claim: dict, search_text: str, urls: list[str], verbose: bool = 
                f"CLAIM: {claim['claim']}\n"
                f"SEARCH RESULTS:\n{search_text}\n")
     start = time.perf_counter()
-    if verbose:
-        print(f"[v] DeepInfra verify -> {claim['claim'][:60]!r}")
-    raw_reply = _chat(VERIFY_PROMPT, context, max_tokens=600)
+    raw_reply = _chat(VERIFY_PROMPT, context, max_tokens=1000)
     if verbose:
         # One print() call, not several: this claim's verify runs in its own worker thread
         # alongside every other claim's, so bundling done-time + raw text into a single write
         # keeps concurrent claims' raw output from interleaving into a garbled mess on screen.
-        lines = [
-            f"[v] DeepInfra verify done in {time.perf_counter() - start:.2f}s -> {claim['claim'][:60]!r}",
-            f"[v] --- RAW RESPONSE (verify: {claim['claim'][:60]!r}) ---",
-            raw_reply,
-            "[v] --- END RAW RESPONSE ---",
-        ]
-        print("\n".join(lines))
+        _print_raw_response(
+            run_id=run_id, claim_label=claim_label or claim["claim"][:60], provider="deepinfra",
+            operation="claim_verification", attempt=1,
+            elapsed=time.perf_counter() - start, body=raw_reply,
+        )
 
     raw_items, protocol_valid = _parse_provider_array(raw_reply)
     if not protocol_valid:
+        # Printed unconditionally (not gated behind verbose) because this is
+        # genuinely rare and is exactly the evidence needed to diagnose why
+        # parsing failed - without it there's no way to tell what the model
+        # actually returned after the fact.
+        print(f"[ERROR] Verification protocol: could not parse a JSON array or object "
+              f"from the response for {claim['claim'][:60]!r}. Raw response:\n{raw_reply}")
         raise ProviderProtocolError("verification response was not a JSON array")
 
     parsed = []
@@ -457,18 +641,76 @@ def _verify_one(claim: dict, search_text: str, urls: list[str], verbose: bool = 
 
     if not parsed:
         if raw_items:
+            print(f"[ERROR] Verification protocol: parsed {len(raw_items)} object(s) but none "
+                  f"had 'supported'/'contradicted' for {claim['claim'][:60]!r}. Raw response:\n{raw_reply}")
             raise ProviderProtocolError("verification response omitted required fields")
         return None
     verdict = parsed[0]
-    if not verdict.get("sources"):
-        verdict["sources"] = urls[:3]
 
-    # Deterministic verdict: derived from supported/contradicted rather than trusting the
-    # model's own "verdict" field, closes the "no evidence found -> FALSE" failure mode
+    # source_analysis is what makes supported/contradicted authoritative rather than
+    # decorative: aggregated per-source stances become these two fields, not whatever
+    # the model returned at the top level directly - otherwise the model could report
+    # supported=true while its own source_analysis says every source CONTRADICTS or is
+    # IRRELEVANT, and nothing would catch it.
+    source_analysis = _validate_source_analysis(verdict.get("source_analysis"), len(sources))
+    if source_analysis:
+        supported, contradicted = _aggregate_stance(source_analysis)
+    else:
+        # Graceful degradation: no usable per-source breakdown (missing, or every entry
+        # was malformed) - fall back to the model's own top-level fields rather than
+        # failing or retrying the whole claim over a partially-malformed response.
+        supported = bool(verdict.get("supported"))
+        contradicted = bool(verdict.get("contradicted"))
+
+    for entry in source_analysis:
+        source = sources[entry["source_index"]]
+        entry["evidence_excerpt_valid"] = _verify_evidence_excerpt(
+            entry["evidence_excerpt"], source.get("content", "")
+        )
+
+    duplicate_group = _group_duplicate_sources(sources)
+    independent_supports = len({
+        duplicate_group[entry["source_index"]]
+        for entry in source_analysis if entry["stance"] == "SUPPORTS"
+    })
+    any_direct = any(
+        entry["directness"] == "DIRECT" and entry["stance"] in ("SUPPORTS", "CONTRADICTS")
+        for entry in source_analysis
+    )
+    all_snippets = bool(sources) and all(not s.get("is_full_content") for s in sources)
+
+    try:
+        raw_confidence = int(verdict.get("confidence", 60))
+    except (TypeError, ValueError):
+        raw_confidence = 60
+    confidence = _cap_confidence(
+        raw_confidence,
+        independent_supports=independent_supports,
+        has_contradiction=contradicted,
+        any_direct=any_direct,
+        all_snippets=all_snippets,
+    )
+
+    verdict["supported"] = supported
+    verdict["contradicted"] = contradicted
+    verdict["source_analysis"] = source_analysis
+    # extension/state.js::normalizeSource already falls back title -> name -> domain ->
+    # "Source N" for object-shaped sources - including domain here means a source with
+    # no Tavily-supplied title shows its domain instead of a generic placeholder.
+    verdict["sources"] = [
+        {"url": s["url"], "title": s.get("title"), "domain": s.get("domain")} for s in sources
+    ]
+    verdict["confidence"] = confidence
+    # No user-facing "warning" text - removed deliberately, see _cap_confidence's
+    # comment. Pop defensively in case the model ever spontaneously includes one
+    # (VERIFY_PROMPT never asks for it, so this should be a no-op in practice).
+    verdict.pop("warning", None)
+
+    # Deterministic verdict: derived from supported/contradicted (themselves now derived
+    # from source_analysis, not trusted from the model directly) rather than trusting the
+    # model's own "verdict" field - closes the "no evidence found -> FALSE" failure mode
     # at the code level instead of just asking the model not to do it.
     model_verdict = str(verdict.get("verdict", "")).upper()
-    supported = bool(verdict.get("supported"))
-    contradicted = bool(verdict.get("contradicted"))
     if supported and not contradicted:
         verdict["verdict"] = "TRUE"
     elif contradicted and not supported:
@@ -489,6 +731,9 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
                verify_workers: int = VERIFY_WORKERS) -> FactCheckResult:
     """Extract, search, and verify claims while retaining the legacy list interface."""
     errors: list[dict] = []
+    # Only used to label --verbose's raw-response terminal blocks so multiple runs in
+    # the same terminal scrollback can be told apart - not a real job/check identity.
+    run_id = secrets.token_hex(4)
 
     def progress(stage: str, **details) -> None:
         _safe_callback(on_progress, {"stage": stage, **details}, "Progress")
@@ -513,14 +758,12 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
     try:
         start = time.perf_counter()
         if verbose:
-            print("[v] DeepInfra extract -> starting")
             raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=4000)
-            print("\n".join([
-                f"[v] DeepInfra extract done in {time.perf_counter() - start:.2f}s",
-                "[v] --- RAW RESPONSE (extract) ---",
-                raw,
-                "[v] --- END RAW RESPONSE ---",
-            ]))
+            _print_raw_response(
+                run_id=run_id, claim_label="-", provider="deepinfra",
+                operation="claim_extraction", attempt=1,
+                elapsed=time.perf_counter() - start, body=raw,
+            )
         else:
             with _loading("Extracting claims (Llama 3.3 70B via DeepInfra)"):
                 raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=4000)
@@ -599,7 +842,7 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
             progress("searching", state="started", claim_index=claim_index,
                      claim_count=len(claims))
             future = search_pool.submit(
-                _search, claim["query"], f"{claim_index + 1}/{len(claims)}", verbose
+                _search, claim["query"], f"{claim_index + 1}/{len(claims)}", verbose, run_id
             )
             search_futures[future] = claim_index
             next_search += 1
@@ -607,13 +850,14 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
     def submit_verifications() -> None:
         while (not cancelled() and pending_verifications
                and len(verify_futures) < verify_backlog_limit):
-            claim_index, search_text, urls = pending_verifications.pop(0)
+            claim_index, search_text, sources = pending_verifications.pop(0)
             progress("verifying", state="started", claim_index=claim_index,
                      claim_count=len(claims))
             if cancelled():
                 return
             future = verify_pool.submit(
-                _verify_one, claims[claim_index], search_text, urls, verbose
+                _verify_one, claims[claim_index], search_text, sources, verbose,
+                f"{claim_index + 1}/{len(claims)}", run_id,
             )
             verify_futures[future] = claim_index
 
@@ -647,7 +891,7 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
                         was_cancelled = True
                         break
                     try:
-                        search_text, urls = future.result()
+                        search_text, sources = future.result()
                     except Exception as exc:
                         if cancelled():
                             was_cancelled = True
@@ -660,7 +904,7 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
                         if not search_text:
                             no_evidence_count += 1
                         else:
-                            pending_verifications.append((claim_index, search_text, urls))
+                            pending_verifications.append((claim_index, search_text, sources))
                             submit_verifications()
                     submit_searches()
                     continue
@@ -762,6 +1006,24 @@ if __name__ == "__main__":
     assert len(_parse_json_array(explanation_colon)) == 1, "colon inside explanation must not corrupt JSON"
     assert _parse_json_array(explanation_colon)[0]["verdict"] == "TRUE", "verdict still quoted correctly"
 
+    # A `{[^{}]*}` regex (the old fallback) cannot match an object containing a
+    # nested object/array anywhere in a field - real bug: a live 9/10-claims-checked
+    # run raised ProviderProtocolError on the tenth because of exactly this. The
+    # fallback now uses json.JSONDecoder.raw_decode so nesting doesn't break it.
+    nested = ('[{"claim":"a","verdict":TRUE,"sources":["u1"],'
+              '"meta":{"note":"see [1]","weight":2}}]')
+    assert len(_parse_json_array(nested)) == 1, "nested object/array in a field must not break parsing"
+    assert _parse_json_array(nested)[0]["meta"]["weight"] == 2, "nested value preserved correctly"
+
+    # Same nested-object case, but forcing the object-scan fallback (truncated,
+    # no closing ]) rather than the full-array path - the fallback is the one
+    # that used the naive non-nesting regex before this fix.
+    nested_truncated = ('[{"claim":"a","verdict":TRUE,"sources":["u1"],'
+                         '"meta":{"note":"see [1]","weight":2}},'
+                         '{"claim":"b","verdict":')
+    assert len(_parse_json_array(nested_truncated)) == 1, "fallback scan must handle nesting too"
+    assert _parse_json_array(nested_truncated)[0]["meta"]["weight"] == 2, "fallback preserves nested value"
+
     # Source ranking: high-quality first, Wikipedia second (above unrecognized domains,
     # below explicit high-quality ones), everything else keeps its original (Tavily-given)
     # relative order last.
@@ -789,6 +1051,77 @@ if __name__ == "__main__":
     except NoEvidenceError:
         raised_no_evidence = True
     assert raised_no_evidence, "empty search evidence must raise NoEvidenceError"
+
+    # _validate_source_analysis: malformed entries are dropped, not fatal.
+    valid_entries = _validate_source_analysis([
+        {"source_index": 0, "stance": "supports", "directness": "direct", "reason": "x", "evidence_excerpt": "q"},
+        {"source_index": 5, "stance": "SUPPORTS"},          # out-of-range index, dropped
+        {"source_index": 1, "stance": "MAYBE"},              # invalid stance, dropped
+        "not even a dict",                                    # dropped
+        {"source_index": 1, "stance": "CONTRADICTS"},         # missing directness, defaults to INDIRECT
+    ], source_count=2)
+    assert len(valid_entries) == 2, "malformed source_analysis entries must be dropped, not fatal"
+    assert valid_entries[0]["stance"] == "SUPPORTS", "stance is uppercased"
+    assert valid_entries[1]["directness"] == "INDIRECT", "missing directness defaults safely"
+    assert _validate_source_analysis(None, source_count=3) == [], "non-list input never raises"
+    assert _validate_source_analysis("not a list", source_count=3) == [], "non-list input never raises"
+
+    # _aggregate_stance is what makes source_analysis authoritative: it must not just
+    # echo whatever the model's own top-level supported/contradicted said.
+    assert _aggregate_stance([{"stance": "SUPPORTS"}, {"stance": "IRRELEVANT"}]) == (True, False)
+    assert _aggregate_stance([{"stance": "CONTRADICTS"}, {"stance": "INSUFFICIENT"}]) == (False, True)
+    assert _aggregate_stance([{"stance": "SUPPORTS"}, {"stance": "CONTRADICTS"}]) == (True, True)
+    assert _aggregate_stance([{"stance": "IRRELEVANT"}]) == (False, False), "topical relevance alone is not support"
+    assert _aggregate_stance([]) == (False, False)
+
+    # _verify_evidence_excerpt: a soft signal, whitespace-normalized substring check.
+    assert _verify_evidence_excerpt("a 50% tariff on steel", "Reports say a  50%\ntariff on steel imports.")
+    assert not _verify_evidence_excerpt("a 90% tariff on steel", "Reports say a 50% tariff on steel imports.")
+    assert not _verify_evidence_excerpt(None, "some content")
+    assert not _verify_evidence_excerpt("quote", "")
+
+    # _group_duplicate_sources: near-identical content groups together (syndicated
+    # copies), clearly different content does not.
+    syndicated = [
+        {"content": "The president announced a 50% tariff on steel imports today."},
+        {"content": "The president announced a 50% tariff on steel imports today, officials said."},
+        {"content": "Meanwhile, the central bank left interest rates unchanged this week."},
+    ]
+    groups = _group_duplicate_sources(syndicated)
+    assert groups[0] == groups[1], "near-identical wire copies must group together"
+    assert groups[2] != groups[0], "unrelated content must not be grouped"
+
+    # _cap_confidence: caps the model's own number silently - no explanatory string,
+    # by design (see the function's own comment).
+    capped = _cap_confidence(98, independent_supports=2, has_contradiction=False,
+                              any_direct=True, all_snippets=False)
+    assert capped == 98, "strong direct evidence is not capped"
+    capped = _cap_confidence(98, independent_supports=0, has_contradiction=False,
+                              any_direct=False, all_snippets=False)
+    assert capped <= _CONFIDENCE_CAP_NO_DIRECT_SOURCE, "no direct source must cap confidence"
+    capped = _cap_confidence(98, independent_supports=1, has_contradiction=True,
+                              any_direct=True, all_snippets=False)
+    assert capped <= _CONFIDENCE_CAP_UNRESOLVED_CONTRADICTION, "unresolved contradiction caps hardest"
+
+    # _print_raw_response: terminal-only debug output, gated by the caller's own
+    # `if verbose:` checks (this function itself has no gate) - confirms the required
+    # fields render and that a genuinely huge body actually gets truncated, not just
+    # decorated with a marker on top of the full text.
+    captured = io.StringIO()
+    with redirect_stdout(captured):
+        _print_raw_response(run_id="test1234", claim_label="1/1", provider="test",
+                             operation="test_op", attempt=1, elapsed=0.5, body="x" * 20_000,
+                             extra_field="present")
+    output = captured.getvalue()
+    assert "run_id: test1234" in output and "extra_field: present" in output
+    assert "...truncated (" in output, "a body over the cap must be truncated with a marker"
+    assert len(output) < 20_000 + 1_000, "truncation must actually shrink a huge body, not just append a marker"
+
+    captured = io.StringIO()
+    with redirect_stdout(captured):
+        _print_raw_response(run_id="t", claim_label="-", provider="test", operation="test_op",
+                             attempt=1, elapsed=0.1, body={"a": 1})
+    assert '"a": 1' in captured.getvalue(), "a non-string body must be pretty-printed as JSON"
 
     print("OK: all self-checks pass")
     

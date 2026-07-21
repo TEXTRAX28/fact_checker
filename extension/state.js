@@ -1,9 +1,22 @@
+// Must cover every value in jobs.py's TERMINAL_STATUSES (after STATE_ALIASES
+// normalization) - a status this set doesn't recognize as terminal means polling/
+// SSE never stops, the Cancel button stays pointed at an already-finished job
+// (a no-op there - jobs.py's cancel() checks job.terminal() first), and the status
+// text never leaves the generic "Check in progress" fallback, even though the
+// backend is genuinely done. Confirmed live: this is what a real DeepInfra timeout
+// looked like before this fix - "timeout" is a real terminal status jobs.py sends,
+// and it wasn't in this set.
 export const TERMINAL_STATES = new Set([
   "complete",
   "complete_no_claims",
   "partial",
   "failed",
   "cancelled",
+  "invalid_input",
+  "no_evidence",
+  "rate_limited",
+  "timeout",
+  "unreadable",
 ]);
 
 export const STAGES = Object.freeze([
@@ -14,6 +27,11 @@ export const STAGES = Object.freeze([
   { id: "verifying", label: "Verdicts" },
 ]);
 
+// Every id a job can be actively working through, before it's terminal. Shared by
+// mergeEvent (SSE) and normalizeSnapshot (polling) so both treat "in flight" the
+// same way - see normalizeSnapshot's own comment for why that parity matters.
+const IN_FLIGHT_STAGES = new Set(STAGES.map((stage) => stage.id));
+
 const STATE_ALIASES = Object.freeze({
   completed: "complete",
   done: "complete",
@@ -22,6 +40,10 @@ const STATE_ALIASES = Object.freeze({
   claims_extracted: "searching",
   verdict: "verifying",
   warning: "verifying",
+  // jobs.py's real "no_claims" terminal status means the same thing this file
+  // already had a synthesized "complete_no_claims" state for - reuse its copy
+  // instead of duplicating it.
+  no_claims: "complete_no_claims",
 });
 
 function firstDefined(...values) {
@@ -69,7 +91,6 @@ export function normalizeResult(result, fallbackIndex = 0) {
     confidence: Math.min(100, Math.max(0, asNumber(result?.confidence, 0))),
     explanation: String(firstDefined(result?.explanation, result?.reasoning, "No explanation was provided.")),
     sources,
-    warning: String(firstDefined(result?.warning, result?.source_warning, "")),
   };
 }
 
@@ -90,6 +111,17 @@ export function normalizeSnapshot(raw = {}, previous = {}) {
   )));
   let state = normalizeState(firstDefined(raw.state, raw.status, previous.state), "idle");
   const stage = normalizeState(firstDefined(raw.stage, progress.stage, raw.event, previous.stage, state), state);
+
+  // The backend's job status is only ever the coarse "running" for the entire time a
+  // check is active - jobs.py never sets a fine-grained top-level status like
+  // "verifying". mergeEvent (SSE) already refines this per-event; snapshot polling
+  // (this function) has no equivalent unless it's done here too. Without this, the
+  // status text gets stuck on the generic "Check in progress" fallback any time the
+  // panel is relying on polling instead of live SSE (e.g. while the backend indicator
+  // shows "Recovering") - confirmed live, not theoretical.
+  if (state === "running" && IN_FLIGHT_STAGES.has(stage)) {
+    state = stage;
+  }
 
   if (state === "complete" && claimCount === 0 && results.length === 0) {
     state = "complete_no_claims";
@@ -123,34 +155,36 @@ export function normalizeSnapshot(raw = {}, previous = {}) {
   };
 }
 
-export function mergeEvent(snapshot, event = {}, eventType = "") {
+// The backend's SSE stream (jobs.py::JobManager._append_event) only ever names an
+// event one of these four ways - "status" ({status}), "progress" (whatever
+// on_progress emitted, e.g. {stage, state, claim_count?}), "result" (the verdict
+// dict itself, not nested under a "result" key), "terminal" ({status, outcome}).
+// Each needs different unpacking; there is no single "the event name is the stage"
+// shortcut, unlike an earlier draft of this vocabulary this code was written against.
+export function mergeEvent(snapshot, data = {}, eventType = "") {
   const current = normalizeSnapshot(snapshot || {});
-  const nextSequence = asNumber(firstDefined(event.sequence, event.event_sequence), current.sequence);
-  if (nextSequence && nextSequence <= current.sequence) return current;
+  const sequence = asNumber(firstDefined(data.sequence, data.event_sequence), current.sequence);
+  if (sequence && sequence <= current.sequence) return current;
+  const next = { ...current, sequence: Math.max(current.sequence, sequence) };
 
-  const rawType = String(firstDefined(event.type, event.event, eventType, current.state));
-  const type = normalizeState(rawType, current.state);
-  const next = {
-    ...current,
-    sequence: Math.max(current.sequence, nextSequence),
-    state: ["complete", "failed", "cancelled", "partial"].includes(type) ? type : current.state,
-    stage: type,
-    claimCount: Math.max(current.claimCount, asNumber(firstDefined(event.claim_count, event.total), current.claimCount)),
-    errors: event.message && type === "warning" ? [...current.errors, String(event.message)] : current.errors,
-  };
-
-  if (["queued", "reading_page", "extracting_claims", "searching", "verifying"].includes(type)) {
-    next.state = type;
+  if (eventType === "status") {
+    const status = normalizeState(data.status, current.state);
+    if (IN_FLIGHT_STAGES.has(status) || status === "cancelling") next.state = status;
+    return normalizeSnapshot(next, current);
   }
 
-  const result = firstDefined(
-    event.result,
-    event.verdict_data,
-    rawType === "verdict" && event.claim ? event : null,
-    rawType === "verdict" ? event.verdict : null,
-  );
-  if (result && typeof result === "object") {
-    const normalized = normalizeResult(result, next.results.length);
+  if (eventType === "progress") {
+    const stage = normalizeState(data.stage, current.stage);
+    next.stage = stage;
+    if (IN_FLIGHT_STAGES.has(stage)) next.state = stage;
+    next.claimCount = Math.max(current.claimCount, asNumber(data.claim_count, current.claimCount));
+    if (data.message && stage === "warning") next.errors = [...current.errors, String(data.message)];
+    return normalizeSnapshot(next, current);
+  }
+
+  if (eventType === "result") {
+    // data IS the verdict dict - not nested under data.result/data.verdict_data.
+    const normalized = normalizeResult(data, next.results.length);
     const results = [...next.results];
     const existingIndex = results.findIndex((item) => item.index === normalized.index);
     if (existingIndex >= 0) results[existingIndex] = normalized;
@@ -158,9 +192,22 @@ export function mergeEvent(snapshot, event = {}, eventType = "") {
     next.results = results;
     next.completedCount = results.length;
     next.state = "verifying";
+    return normalizeSnapshot(next, current);
   }
 
-  return normalizeSnapshot(next, current);
+  if (eventType === "terminal") {
+    const outcome = data.outcome && typeof data.outcome === "object" ? data.outcome : {};
+    return normalizeSnapshot({
+      sequence: next.sequence,
+      status: data.status,
+      results: outcome.results,
+      errors: outcome.errors,
+      claim_count: outcome.claim_count,
+    }, current);
+  }
+
+  // Unrecognized event name - leave state alone rather than guess.
+  return next;
 }
 
 export function isTerminalState(state) {
@@ -191,6 +238,11 @@ export function statusCopy(snapshot) {
     failed: ["Check failed", "The backend could not finish this check."],
     cancelling: ["Cancelling…", "Waiting for the current step to stop before finishing."],
     cancelled: ["Check cancelled", "No additional claims will be processed."],
+    no_evidence: ["No evidence found", "Claims were found, but no sufficiently reliable evidence was available."],
+    rate_limited: ["Rate limited", "A provider's rate limit was reached. Try again shortly."],
+    timeout: ["Check timed out", "A provider took too long to respond."],
+    unreadable: ["Page unreadable", "The page could not be read. Try pasting the article text instead."],
+    invalid_input: ["Invalid input", "That input could not be checked."],
   };
   return copy[state] || ["Check in progress", "Waiting for the latest status."];
 }
@@ -212,4 +264,56 @@ export function compactSession(snapshot, job) {
     errors: snapshot?.errors || [],
     cached: Boolean(snapshot?.cached),
   };
+}
+
+// Pure data-shaping for the Export buttons, kept here (not in sidepanel.js) so it's
+// testable without a DOM/chrome.* shim, matching how the rest of this file works.
+export function buildExportData(snapshot, source = {}) {
+  const results = snapshot?.results || [];
+  return {
+    exportedAt: new Date().toISOString(),
+    source: {
+      mode: source.mode || null,
+      title: source.title || null,
+      url: source.url || null,
+    },
+    summary: {
+      status: snapshot?.state || "idle",
+      claimCount: snapshot?.claimCount || results.length,
+      completedCount: results.length,
+    },
+    claims: results.map((result) => ({
+      index: result.index,
+      verdict: result.verdict,
+      confidence: result.confidence,
+      claim: result.claim,
+      explanation: result.explanation,
+      sources: result.sources || [],
+    })),
+  };
+}
+
+export function toMarkdownReport(data) {
+  const lines = ["# Fact Check Report", ""];
+  if (data.source.title) lines.push(`**Source:** ${data.source.title}`);
+  if (data.source.url) lines.push(`**URL:** ${data.source.url}`);
+  lines.push(`**Exported:** ${data.exportedAt}`);
+  lines.push(`**Claims checked:** ${data.summary.completedCount} of ${data.summary.claimCount}`);
+  lines.push("");
+
+  data.claims.forEach((claim, position) => {
+    const label = Number.isFinite(claim.index) ? claim.index + 1 : position + 1;
+    const confidence = claim.confidence ? ` (${Math.round(claim.confidence)}% confidence)` : "";
+    lines.push(`## ${label}. ${claim.verdict}${confidence}`, "", claim.claim || "", "");
+    if (claim.explanation) lines.push(claim.explanation, "");
+    if (claim.sources.length) {
+      lines.push("Sources:");
+      for (const source of claim.sources) {
+        lines.push(`- [${source.title || source.url}](${source.url})`);
+      }
+      lines.push("");
+    }
+  });
+
+  return lines.join("\n");
 }

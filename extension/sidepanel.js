@@ -11,12 +11,14 @@ import { CLIENT_LIMITS } from "./config.js";
 import { createIcon, hydrateIcons } from "./icons.js";
 import {
   STAGES,
+  buildExportData,
   compactSession,
   isTerminalState,
   mergeEvent,
   normalizeSnapshot,
   stageIndex,
   statusCopy,
+  toMarkdownReport,
 } from "./state.js";
 
 const STORAGE = Object.freeze({
@@ -24,19 +26,14 @@ const STORAGE = Object.freeze({
   activeTabId: "fc:activeTabId",
   drafts: "fc:drafts",
 });
-const SSE_EVENTS = [
-  "queued",
-  "reading_page",
-  "extracting_claims",
-  "claims_extracted",
-  "searching",
-  "verifying",
-  "verdict",
-  "warning",
-  "complete",
-  "failed",
-  "cancelled",
-];
+// Must match jobs.py::JobManager._append_event's actual event names exactly - a
+// browser EventSource only delivers a named event to a listener registered for
+// that exact name (it does not fall through to the generic "message" handler).
+// This list previously named stage-specific events (queued/verifying/etc.) from
+// an earlier draft of the event vocabulary; the real backend only ever sends
+// these four envelope names, so every SSE event was silently unhandled until
+// this was fixed - confirmed live, this wasn't a guess.
+const SSE_EVENTS = ["status", "progress", "result", "terminal"];
 
 const elements = {
   backend: document.querySelector("#backend-status"),
@@ -57,6 +54,7 @@ const elements = {
   resultsSection: document.querySelector("#results-section"),
   resultsCount: document.querySelector("#results-count"),
   resultsList: document.querySelector("#results-list"),
+  exportActions: document.querySelector("#export-actions"),
   liveStatus: document.querySelector("#live-status"),
 };
 
@@ -183,6 +181,19 @@ async function loadPageData() {
   await discardStaleJobIfPageChanged();
 }
 
+async function resetActiveJob() {
+  // Shared by every case where the active job can no longer be trusted: the
+  // server has no record of it (404 - almost always because api.py restarted
+  // and its in-memory JobManager lost every job it knew about, which happens
+  // often during local dev/testing), or the page underneath a finished
+  // page-mode check has changed. Always safe to call - never interrupts
+  // legitimate still-running work on its own, callers decide when it applies.
+  stopTransport();
+  app.job = null;
+  app.snapshot = normalizeSnapshot({ state: "idle" });
+  await chrome.storage.session.remove(STORAGE.activeJob);
+}
+
 async function discardStaleJobIfPageChanged() {
   // A finished page-mode check must never be left on screen once the page
   // underneath it has changed - otherwise a completed check for one article
@@ -197,10 +208,11 @@ async function discardStaleJobIfPageChanged() {
   const currentUrl = app.page?.url || "";
   if (currentUrl && jobUrl === currentUrl) return;
 
-  stopTransport();
-  app.job = null;
-  app.snapshot = normalizeSnapshot({ state: "idle" });
-  await chrome.storage.session.remove(STORAGE.activeJob);
+  await resetActiveJob();
+}
+
+function isJobNotFound(error) {
+  return error instanceof ApiError && error.status === 404;
 }
 
 function setMode(mode) {
@@ -414,6 +426,14 @@ function renderResults() {
   elements.resultsCount.textContent = slotCount
     ? `${results.length} of ${slotCount}`
     : "";
+
+  elements.exportActions.hidden = results.length === 0;
+  if (results.length > 0) {
+    elements.exportActions.replaceChildren(
+      actionButton("Export JSON", "download", () => exportResults("json")),
+      actionButton("Export Markdown", "download", () => exportResults("markdown")),
+    );
+  }
   elements.resultsList.replaceChildren();
 
   if (showEmpty) {
@@ -473,7 +493,6 @@ function renderResult(result) {
     card.append(list);
   }
 
-  if (result.warning) card.append(node("p", "result-warning", `Warning: ${result.warning}`));
   return card;
 }
 
@@ -547,7 +566,12 @@ async function requestCancellation() {
     await cancelCheck(app.job.checkId);
     await refreshSnapshot();
   } catch (error) {
-    showRequestError(error);
+    if (isJobNotFound(error)) {
+      await resetActiveJob();
+      render();
+    } else {
+      showRequestError(error);
+    }
   } finally {
     app.cancelPending = false;
     renderAction();
@@ -606,7 +630,13 @@ async function refreshSnapshot() {
     render();
     if (isTerminalState(app.snapshot.state)) stopTransport();
   } catch (error) {
-    if (error instanceof ApiError && ["backend_offline", "timeout"].includes(error.code)) {
+    if (isJobNotFound(error)) {
+      // The backend has no record of this job - almost always api.py having
+      // restarted since this job was created. Polling it forever would never
+      // recover on its own; resetting is the only correct move.
+      await resetActiveJob();
+      render();
+    } else if (error instanceof ApiError && ["backend_offline", "timeout"].includes(error.code)) {
       setBackend("offline");
       schedulePolling(2_500);
     }
@@ -663,6 +693,32 @@ function submissionContext() {
   return { title: "Pasted text" };
 }
 
+function exportResults(format) {
+  // app.job.context is what was actually checked (captured at submission time);
+  // preferred over submissionContext(), which reflects the current input and may
+  // have changed since the check ran.
+  const source = app.job?.context || submissionContext();
+  const data = buildExportData(app.snapshot, { mode: app.job?.mode || app.mode, ...source });
+  const stamp = data.exportedAt.replace(/[:.]/g, "-");
+  if (format === "json") {
+    downloadFile(`fact-check-${stamp}.json`, JSON.stringify(data, null, 2), "application/json");
+  } else {
+    downloadFile(`fact-check-${stamp}.md`, toMarkdownReport(data), "text/markdown");
+  }
+}
+
+function downloadFile(filename, content, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 async function persistActiveJob() {
   const compact = compactSession(app.snapshot, app.job);
   if (compact) await chrome.storage.session.set({ [STORAGE.activeJob]: compact });
@@ -693,8 +749,12 @@ function pageMeta(page) {
 
 function statusVisual(state) {
   if (state === "complete") return { icon: "shield-check", tone: "success" };
-  if (["complete_no_claims", "partial"].includes(state)) return { icon: "triangle-alert", tone: "warning" };
-  if (["failed", "cancelled"].includes(state)) return { icon: state === "failed" ? "x" : "square", tone: "danger" };
+  if (["complete_no_claims", "partial", "no_evidence"].includes(state)) {
+    return { icon: "triangle-alert", tone: "warning" };
+  }
+  if (["failed", "cancelled", "timeout", "rate_limited", "unreadable", "invalid_input"].includes(state)) {
+    return { icon: state === "cancelled" ? "square" : "x", tone: "danger" };
+  }
   return { icon: "search", tone: "active" };
 }
 
