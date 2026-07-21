@@ -135,8 +135,13 @@ Return a JSON array. Each item must have:
            "OpenAI Sam Altman ChatGPT one million users five days", not just "ChatGPT million users".
   "speaker": the name or label of who made the claim (e.g. "Senator Davis", "SPEAKER_A"), use "UNKNOWN" only if truly unidentifiable
 
-Only include: statistics, numbers, dates, named events, quotes, scientific/medical/legal/historical facts.
-Skip: opinions, predictions, vague statements, rhetorical questions.
+Only include: statistics, numbers, dates, named events, quotes, scientific/medical/legal/historical
+facts, and factual-sounding assertions about a named person or entity (identity, role, personal
+attributes) even if sensitive or likely hard to verify.
+Skip: subjective value judgments (e.g. "X is a bad person"), predictions, vague statements,
+rhetorical questions. Do NOT skip a factual-sounding claim just because it's sensitive, personal,
+or likely unverifiable (e.g. a claim about someone's identity, orientation, or private life) -
+extract it; the verifier will return UNVERIFIABLE if no evidence exists either way.
 Also skip routine procedural narration the source already states as plain, undisputed fact (a plea
 entered, a filing date, a standard step in a legal/administrative process), UNLESS it contains a
 specific number, quote, or attribution that could plausibly be misreported. Routine narration has
