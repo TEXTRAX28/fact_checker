@@ -402,6 +402,47 @@ export function claimProgressCopy(stage) {
 // testable without a DOM/chrome.* shim, matching how the rest of this file works.
 export function buildExportData(snapshot, source = {}) {
   const results = [...(snapshot?.results || [])].sort((left, right) => left.index - right.index);
+  const resultByIndex = new Map(results.map((result) => [result.index, result]));
+  const manifestByIndex = new Map(
+    (snapshot?.claimManifest || []).map((claim) => [claim.index, claim]),
+  );
+  const errorByIndex = new Map(
+    (snapshot?.claimErrors || []).map((error) => [error.claimIndex, error]),
+  );
+  const claimCount = Math.max(
+    snapshot?.claimCount || 0,
+    results.length,
+    ...[...manifestByIndex.keys(), ...resultByIndex.keys()].map((index) => index + 1),
+  );
+  const claims = Array.from({ length: claimCount }, (_, index) => {
+    const result = resultByIndex.get(index);
+    if (result) {
+      return {
+        index,
+        status: "completed",
+        verdict: result.verdict,
+        confidence: result.confidence,
+        claim: result.claim,
+        explanation: result.explanation,
+        sources: result.sources || [],
+      };
+    }
+
+    const manifest = manifestByIndex.get(index);
+    const error = errorByIndex.get(index);
+    return {
+      index,
+      status: error ? "failed" : "incomplete",
+      claim: manifest?.claim || "Claim unavailable",
+      speaker: manifest?.speaker || "UNKNOWN",
+      error: error ? {
+        stage: error.stage,
+        code: error.code,
+        message: error.message,
+      } : null,
+      sources: [],
+    };
+  });
   return {
     exportedAt: new Date().toISOString(),
     source: {
@@ -411,17 +452,21 @@ export function buildExportData(snapshot, source = {}) {
     },
     summary: {
       status: snapshot?.state || "idle",
-      claimCount: snapshot?.claimCount || results.length,
+      claimCount,
       completedCount: results.length,
+      failedCount: claims.filter((claim) => claim.status === "failed").length,
+      incompleteCount: claims.filter((claim) => claim.status === "incomplete").length,
     },
-    claims: results.map((result) => ({
-      index: result.index,
-      verdict: result.verdict,
-      confidence: result.confidence,
-      claim: result.claim,
-      explanation: result.explanation,
-      sources: result.sources || [],
-    })),
+    errors: [
+      ...(snapshot?.errors || []).map((message) => ({ message })),
+      ...(snapshot?.claimErrors || []).map((error) => ({
+        claimIndex: error.claimIndex,
+        stage: error.stage,
+        code: error.code,
+        message: error.message,
+      })),
+    ],
+    claims,
   };
 }
 
@@ -435,10 +480,16 @@ export function toMarkdownReport(data) {
 
   data.claims.forEach((claim, position) => {
     const label = Number.isFinite(claim.index) ? claim.index + 1 : position + 1;
+    if (claim.status !== "completed") {
+      const state = claim.status === "failed" ? "FAILED" : "NOT COMPLETED";
+      lines.push(`## ${label}. ${state}`, "", claim.claim || "Claim unavailable", "");
+      if (claim.error?.message) lines.push(`Error: ${claim.error.message}`, "");
+      return;
+    }
     const confidence = claim.confidence ? ` (${Math.round(claim.confidence)}% confidence)` : "";
     lines.push(`## ${label}. ${claim.verdict}${confidence}`, "", claim.claim || "", "");
     if (claim.explanation) lines.push(claim.explanation, "");
-    if (claim.sources.length) {
+    if (claim.sources?.length) {
       lines.push("Sources:");
       for (const source of claim.sources) {
         lines.push(`- [${source.title || source.url}](${source.url})`);

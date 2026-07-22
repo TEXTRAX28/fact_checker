@@ -218,12 +218,41 @@ def test_results_emit_in_completion_order_with_stable_claim_pairing(monkeypatch)
 def test_no_search_evidence_has_distinct_status(monkeypatch):
     monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: extraction_payload(2))
     monkeypatch.setattr(fact_checker, "_search", lambda *_args, **_kwargs: ("", []))
+    emitted = []
 
-    result = fact_checker.fact_check("A sufficiently long factual sentence.", verbose=True)
+    result = fact_checker.fact_check(
+        "A sufficiently long factual sentence.", on_result=emitted.append, verbose=True
+    )
 
     assert result.status == "no_evidence"
     assert result.claim_count == 2
-    assert result == []
+    assert len(result) == 2
+    assert result == emitted
+    assert {item["claim_index"] for item in result} == {0, 1}
+    assert {item["verdict"] for item in result} == {"UNVERIFIABLE"}
+    assert all(item["sources"] == [] for item in result)
+
+
+def test_one_evidence_miss_does_not_leave_a_partial_blank_claim(monkeypatch):
+    monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: extraction_payload(2))
+
+    def search(query, *_args, **_kwargs):
+        if query == "query-0":
+            return "", []
+        return "evidence", [one_source()]
+
+    monkeypatch.setattr(fact_checker, "_search", search)
+    monkeypatch.setattr(
+        fact_checker, "_verify_one", lambda claim, *_args, **_kwargs: verdict_for(claim)
+    )
+
+    result = fact_checker.fact_check("A sufficiently long factual sentence.", verbose=True)
+
+    assert result.status == "completed"
+    by_index = {item["claim_index"]: item for item in result}
+    assert by_index[0]["verdict"] == "UNVERIFIABLE"
+    assert by_index[0]["sources"] == []
+    assert by_index[1]["verdict"] == "TRUE"
 
 
 def test_per_future_failure_preserves_partial_result(monkeypatch):

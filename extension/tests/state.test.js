@@ -337,6 +337,46 @@ test("buildExportData shapes a completed snapshot for export", () => {
   assert.equal(typeof data.exportedAt, "string");
 });
 
+test("buildExportData includes failed and unfinished claim slots", () => {
+  const snapshot = normalizeSnapshot({
+    id: "check-partial-export",
+    status: "partial",
+    claim_count: 3,
+    results: [
+      { claim_index: 0, claim: "Completed claim.", verdict: "TRUE", sources: [] },
+    ],
+    claim_manifest: [
+      { claim_index: 0, claim: "Completed claim.", speaker: "A" },
+      { claim_index: 1, claim: "Timed-out claim.", speaker: "A" },
+      { claim_index: 2, claim: "Unfinished claim.", speaker: "A" },
+    ],
+    errors: [{
+      claim_index: 1,
+      stage: "verification",
+      code: "provider_timeout",
+      message: "A provider request timed out.",
+    }],
+  });
+
+  const data = buildExportData(snapshot, { mode: "text", title: "Pasted text" });
+
+  assert.equal(data.claims.length, 3);
+  assert.equal(data.claims[0].status, "completed");
+  assert.equal(data.claims[1].status, "failed");
+  assert.equal(data.claims[1].claim, "Timed-out claim.");
+  assert.equal(data.claims[1].error.code, "provider_timeout");
+  assert.equal(data.claims[2].status, "incomplete");
+  assert.equal(data.summary.failedCount, 1);
+  assert.equal(data.summary.incompleteCount, 1);
+  assert.equal(data.errors[0].claimIndex, 1);
+
+  const markdown = toMarkdownReport(data);
+  assert.match(markdown, /## 2\. FAILED/);
+  assert.match(markdown, /Timed-out claim\./);
+  assert.match(markdown, /A provider request timed out\./);
+  assert.match(markdown, /## 3\. NOT COMPLETED/);
+});
+
 test("toMarkdownReport renders source, summary, and every claim", () => {
   const data = buildExportData(
     normalizeSnapshot({

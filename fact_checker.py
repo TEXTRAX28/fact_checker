@@ -173,7 +173,11 @@ DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
 
 EXTRACT_PROMPT = """Extract up to 15 most specific and verifiable factual claims from the text.
 Return a JSON array. Each item must have:
-  "claim": the exact claim as stated
+  "claim": a faithful, self-contained version of the factual claim. Preserve names, numbers,
+           units, dates, and the source's wording wherever possible so the claim can still be
+           located in the original text. Remove rhetorical intensifiers or subjective framing
+           (such as "dangerous metabolic tidal wave", "violent", or "brutal") that cannot be
+           independently verified. Never add a fact or inference that the source did not state.
   "query": a short search query that targets the underlying FACT, not just the names in the claim.
            e.g. for "X is president of Indonesia" use "current president of Indonesia" so the real
            answer is findable and the claim can be disproved if false.
@@ -190,6 +194,9 @@ Skip: subjective value judgments (e.g. "X is a bad person"), predictions, vague 
 rhetorical questions. Do NOT skip a factual-sounding claim just because it's sensitive, personal,
 or likely unverifiable (e.g. a claim about someone's identity, orientation, or private life) -
 extract it; the verifier will return UNVERIFIABLE if no evidence exists either way.
+If one sentence mixes checkable facts with rhetoric, extract only the factual core. If it combines
+independent factual assertions that could receive different verdicts, split them into separate
+claims. Keep tightly related quantities together only when they describe one calculation or whole.
 Also skip routine procedural narration the source already states as plain, undisputed fact (a plea
 entered, a filing date, a standard step in a legal/administrative process), UNLESS it contains a
 specific number, quote, or attribution that could plausibly be misreported. Routine narration has
@@ -200,6 +207,9 @@ budget breakdown, a ratio that sums to a total), extract them as ONE claim descr
 breakdown, not one claim per figure. e.g. for "60% from nilai manfaat, 40% from Bipih" extract
 a single claim "the scheme is 60% nilai manfaat and 40% Bipih", not two separate claims. Splitting
 them risks one being verified TRUE and the other FALSE even though they're the same fact.
+For a claim about a named authority's limit, guideline, or recommendation, make the query target
+that authority's official guidance and include the quantity being compared. For a calculated claim,
+query for the underlying per-unit values and the named benchmark, not the dramatic conclusion.
 Return [] if nothing is checkable.
 Return ONLY the JSON array, no other text."""
 
@@ -276,6 +286,21 @@ This applies to ANY numeric claim, not just money: heights, distances, dates, co
 e.g. a claim of "$125m in losses" against a source saying "$120m" is supported, not contradicted,
 and a claim of "approximately 335 meters" against sources saying 324m-330m is supported, not
 contradicted, small measurement variance is not a fabrication.
+
+CALCULATIONS AND GUIDELINE COMPARISONS:
+Perform basic arithmetic and standard unit conversions when the accepted evidence supplies the
+inputs. A source that states a per-unit amount can directly support a claimed total for multiple
+identical units; do not mark the total UNVERIFIABLE merely because the source did not print the
+multiplication result. Show the calculation briefly in the explanation. For example, four packages
+with 25 g each directly support a 100 g total. Likewise, recalculate a percentage comparison before
+choosing a stance: 87 compared with a limit of 30 is 290%, which reasonably supports
+"nearly 300%."
+
+When a claim names an organization's recommendation, distinguish its main recommendation from a
+stricter conditional or aspirational target. Judge the claim against the benchmark it actually
+names; do not silently replace that benchmark with a different recommendation. Before returning,
+check that every calculation in the explanation agrees with the selected source stances,
+supported/contradicted fields, and verdict.
 
 EVIDENCE ABOUT A DIFFERENT INSTANCE IS NOT THE SAME AS NO EVIDENCE:
 If the search results discuss a different specific instance of a similar recurring subject (a
@@ -817,6 +842,30 @@ def _language_safe_explanation(verdict: str, source_analysis: list[dict],
             "so it remains unverifiable.")
 
 
+def _no_evidence_verdict(claim: dict, claim_index: int,
+                         document_language: str | None = None) -> dict:
+    """Represent an evidence miss explicitly instead of leaving a blank claim slot."""
+    language = _detect_supported_language(claim.get("claim")) or document_language or "English"
+    if language == "Indonesian":
+        explanation = ("Tidak ditemukan bukti yang cukup relevan, sehingga klaim ini tidak "
+                       "dapat diverifikasi.")
+    else:
+        explanation = ("No sufficiently relevant evidence was retrieved, so this claim cannot "
+                       "be verified.")
+    return {
+        "claim": claim["claim"],
+        "speaker": claim.get("speaker", "UNKNOWN"),
+        "claim_index": claim_index,
+        "supported": False,
+        "contradicted": False,
+        "verdict": "UNVERIFIABLE",
+        "confidence": 60,
+        "explanation": explanation,
+        "source_analysis": [],
+        "sources": [],
+    }
+
+
 def _group_duplicate_sources(sources: list[dict]) -> list[int]:
     # Returns, per source, the index of the first source in its near-duplicate group
     # (itself, if it's first) - groups syndicated/wire-service copies so they don't
@@ -1239,6 +1288,12 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
                             break
                         if not search_text:
                             no_evidence_count += 1
+                            verdict = _no_evidence_verdict(
+                                claims[claim_index], claim_index, document_language
+                            )
+                            results.append(verdict)
+                            if not cancelled():
+                                _safe_callback(on_result, verdict, "Result")
                         else:
                             _safe_callback(on_evidence, {
                                 "claim_index": claim_index,
@@ -1263,6 +1318,12 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
                         was_cancelled = True
                         break
                     no_evidence_count += 1
+                    verdict = _no_evidence_verdict(
+                        claims[claim_index], claim_index, document_language
+                    )
+                    results.append(verdict)
+                    if not cancelled():
+                        _safe_callback(on_result, verdict, "Result")
                     submit_searches()
                     continue
                 except WholeJobDeadlineExceeded:
@@ -1314,7 +1375,9 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
         return finish("partial" if results else "timeout", results, len(claims))
     if was_cancelled:
         return finish("cancelled", results, len(claims))
-    if results and len(results) == len(claims):
+    if len(results) == len(claims) and no_evidence_count == len(claims):
+        return finish("no_evidence", results, len(claims))
+    if len(results) == len(claims):
         return finish("completed", results, len(claims))
     if results:
         return finish("partial", results, len(claims))
