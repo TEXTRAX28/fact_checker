@@ -122,6 +122,42 @@ def test_page_url_text_dispatch_and_snapshot_results_progress(client, monkeypatc
     assert calls[-2:] == [("https://example.com", None), ("plain", {"source": "text"})]
 
 
+def test_extracted_claims_and_per_claim_progress_are_visible_without_queries(monkeypatch):
+    claims_ready = threading.Event()
+    release = threading.Event()
+
+    def checking(*_args, **kwargs):
+        kwargs["on_claims"]([
+            {"claim": "First detected claim", "query": "private first query", "speaker": "A"},
+            {"claim": "Second detected claim", "query": "private second query", "speaker": "B"},
+        ])
+        kwargs["on_progress"]({
+            "stage": "searching", "state": "started", "claim_index": 0, "claim_count": 2,
+        })
+        claims_ready.set()
+        release.wait(2)
+        return Outcome()
+
+    monkeypatch.setattr(jobs.service, "check_text", checking)
+    manager = jobs.JobManager(max_workers=1, rate_limit=20)
+    with TestClient(api.create_app(lambda: manager)) as test_client:
+        created = test_client.post(
+            "/v1/checks", json={"type": "text", "text": "factual input"}
+        ).json()
+        try:
+            assert claims_ready.wait(1)
+            snapshot = test_client.get(f"/v1/checks/{created['id']}").json()
+            assert snapshot["claim_manifest"] == [
+                {"claim_index": 0, "claim": "First detected claim", "speaker": "A"},
+                {"claim_index": 1, "claim": "Second detected claim", "speaker": "B"},
+            ]
+            assert snapshot["claim_progress"] == {"0": "searching", "1": "waiting"}
+            assert "private first query" not in str(snapshot)
+            assert "private second query" not in str(snapshot)
+        finally:
+            release.set()
+
+
 def test_active_capacity_and_creation_rate_limits(monkeypatch):
     release = threading.Event()
     monkeypatch.setattr(
@@ -175,6 +211,9 @@ def test_delete_is_cancelling_until_service_returns(monkeypatch):
 
 def test_sse_replays_after_last_event_and_ends_at_terminal(client, monkeypatch):
     def emitting(*_args, **kwargs):
+        kwargs["on_claims"]([{
+            "claim": "result", "query": "private result query", "speaker": "A",
+        }])
         kwargs["on_progress"]({"stage": "one"})
         kwargs["on_result"]({"claim": "result"})
         return Outcome(results=[{"claim": "result"}])
@@ -186,6 +225,7 @@ def test_sse_replays_after_last_event_and_ends_at_terminal(client, monkeypatch):
         f"/v1/checks/{created['id']}/events", headers={"Last-Event-ID": "2"}
     )
     assert response.status_code == 200
+    assert "event: claims" in response.text
     assert "event: progress" in response.text
     assert "event: result" in response.text
     assert "event: terminal" in response.text
@@ -193,6 +233,7 @@ def test_sse_replays_after_last_event_and_ends_at_terminal(client, monkeypatch):
     assert ids == sorted(ids)
     assert all(event_id > 2 for event_id in ids)
     assert ids[-1] == done["sequence"]
+    assert "private result query" not in response.text
 
 
 def test_optional_bearer_auth_is_constant_interface(monkeypatch):

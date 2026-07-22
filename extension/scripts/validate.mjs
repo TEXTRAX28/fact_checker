@@ -10,6 +10,7 @@ assert.equal(manifest.manifest_version, 3);
 assert.equal(manifest.minimum_chrome_version, "116");
 assert.deepEqual(manifest.permissions, ["activeTab", "scripting", "sidePanel", "storage"]);
 assert.deepEqual(manifest.host_permissions, ["http://localhost/*", "http://127.0.0.1/*"]);
+assert.deepEqual(manifest.optional_host_permissions, ["http://*/*", "https://*/*"]);
 assert.equal(manifest.side_panel.default_path, "sidepanel.html");
 assert.equal(manifest.background.service_worker, "service-worker.js");
 
@@ -18,6 +19,7 @@ const requiredFiles = [
   "sidepanel.css",
   "sidepanel.js",
   "page-find.js",
+  "page-capture.js",
   "vendor/readability/Readability.js",
   "vendor/readability/LICENSE",
   "vendor/lucide/LICENSE",

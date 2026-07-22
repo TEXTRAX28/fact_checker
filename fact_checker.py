@@ -335,19 +335,37 @@ def _tavily_():
         _tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
     return _tavily
 
+
+def _read_chat_stream(stream, deadline: float | None) -> str:
+    parts: list[str] = []
+    for event in stream:
+        if deadline is not None:
+            _remaining_seconds(deadline)
+        choices = getattr(event, "choices", None)
+        if not choices:
+            continue
+        delta = getattr(choices[0], "delta", None)
+        content = getattr(delta, "content", None)
+        if isinstance(content, str):
+            parts.append(content)
+    return "".join(parts)
+
+
 def _chat(system: str, user: str, max_tokens: int, *, deadline: float | None = None) -> str:
     for attempt in range(PROVIDER_MAX_RETRIES + 1):
         try:
-            response = _deepinfra_().chat.completions.create(
+            stream = _deepinfra_().chat.completions.create(
                 model=MODEL,
                 max_tokens=max_tokens,
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
+                stream=True,
                 timeout=_bounded_timeout(DEEPINFRA_TIMEOUT_SECONDS, deadline),
             )
-            return response.choices[0].message.content or ""
+            with stream:
+                return _read_chat_stream(stream, deadline)
         except Exception as exc:
             print(f"[ERROR] DeepInfra attempt {attempt + 1}: {type(exc).__name__}: {exc}")
             if (isinstance(exc, WholeJobDeadlineExceeded)

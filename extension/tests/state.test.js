@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildExportData,
+  claimProgressCopy,
   compactSession,
   isTerminalState,
   mergeEvent,
@@ -74,6 +75,24 @@ test("mergeEvent handles a status event (e.g. cancelling)", () => {
   assert.equal(merged.state, "cancelling");
 });
 
+test("mergeEvent reveals extracted claims before any verdict finishes", () => {
+  const current = normalizeSnapshot({ id: "check-2", status: "running", sequence: 2 });
+  const merged = mergeEvent(current, {
+    sequence: 3,
+    claim_count: 2,
+    claims: [
+      { claim_index: 0, claim: "First detected claim", speaker: "A" },
+      { claim_index: 1, claim: "Second detected claim", speaker: "B" },
+    ],
+  }, "claims");
+
+  assert.equal(merged.claimCount, 2);
+  assert.deepEqual(merged.claimManifest.map((claim) => claim.claim), [
+    "First detected claim", "Second detected claim",
+  ]);
+  assert.deepEqual(merged.claimProgress, { 0: "waiting", 1: "waiting" });
+});
+
 test("mergeEvent handles a progress event, refining stage and claim count", () => {
   const current = normalizeSnapshot({ id: "check-2", status: "running", sequence: 4 });
   const merged = mergeEvent(current, {
@@ -85,6 +104,7 @@ test("mergeEvent handles a progress event, refining stage and claim count", () =
   }, "progress");
   assert.equal(merged.state, "verifying");
   assert.equal(merged.claimCount, 5);
+  assert.equal(merged.claimProgress[2], "verifying");
 });
 
 test("mergeEvent handles a result event - data IS the verdict, not nested", () => {
@@ -104,6 +124,19 @@ test("mergeEvent handles a result event - data IS the verdict, not nested", () =
   assert.equal(merged.state, "verifying");
   assert.equal(merged.results.length, 1);
   assert.equal(merged.results[0].verdict, "FALSE");
+  assert.equal(merged.claimProgress[0], "complete");
+});
+
+test("claimProgressCopy clearly marks unfinished claims as unverified", () => {
+  assert.deepEqual(claimProgressCopy("waiting"), [
+    "DETECTED", "Not verified yet. Waiting for source search.",
+  ]);
+  assert.deepEqual(claimProgressCopy("searching"), [
+    "FINDING SOURCES", "Searching for relevant, reliable evidence.",
+  ]);
+  assert.deepEqual(claimProgressCopy("verifying"), [
+    "CHECKING EVIDENCE", "Comparing this claim against accepted evidence.",
+  ]);
 });
 
 test("mergeEvent handles a terminal event, unpacking the nested outcome", () => {
@@ -254,6 +287,7 @@ test("normalizeSnapshot retains structured failed-claim retry state", () => {
     retrying_claim_index: 1,
     retry_attempts: { 1: 1 },
     claim_retry_limit: 2,
+    claim_progress: { 0: "complete", 1: "verifying" },
   });
 
   assert.deepEqual(snapshot.errors, []);
@@ -266,6 +300,7 @@ test("normalizeSnapshot retains structured failed-claim retry state", () => {
   assert.equal(snapshot.claimManifest[1].claim, "failed claim");
   assert.equal(snapshot.retryingClaimIndex, 1);
   assert.equal(snapshot.retryAttempts[1], 1);
+  assert.deepEqual(snapshot.claimProgress, { 0: "complete", 1: "verifying" });
 
   const terminal = mergeEvent(snapshot, {
     sequence: 5,

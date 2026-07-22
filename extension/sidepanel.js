@@ -10,9 +10,11 @@ import {
 } from "./api.js";
 import { CLIENT_LIMITS } from "./config.js";
 import { createIcon, hydrateIcons } from "./icons.js";
+import { hasNewPageSinceCheck, requestFreshPageCapture } from "./page-capture.js";
 import {
   STAGES,
   buildExportData,
+  claimProgressCopy,
   compactSession,
   isTerminalState,
   mergeEvent,
@@ -34,9 +36,9 @@ const STORAGE = Object.freeze({
 // that exact name (it does not fall through to the generic "message" handler).
 // This list previously named stage-specific events (queued/verifying/etc.) from
 // an earlier draft of the event vocabulary; the real backend only ever sends
-// these four envelope names, so every SSE event was silently unhandled until
+// these envelope names, so every SSE event was silently unhandled until
 // this was fixed - confirmed live, this wasn't a guess.
-const SSE_EVENTS = ["status", "progress", "result", "terminal"];
+const SSE_EVENTS = ["status", "claims", "progress", "result", "terminal"];
 
 const elements = {
   backend: document.querySelector("#backend-status"),
@@ -56,6 +58,7 @@ const elements = {
   jobErrors: document.querySelector("#job-errors"),
   resultsSection: document.querySelector("#results-section"),
   resultsCount: document.querySelector("#results-count"),
+  resultsContext: document.querySelector("#results-context"),
   resultsList: document.querySelector("#results-list"),
   exportActions: document.querySelector("#export-actions"),
   liveStatus: document.querySelector("#live-status"),
@@ -178,13 +181,14 @@ function bindEvents() {
   setInterval(() => void checkBackend({ quiet: true }), 30_000);
 }
 
-function requestPageRefresh() {
-  // Re-captures whatever tab is active right now, not necessarily the one this
-  // panel last captured - covers both "same tab, navigated to a new URL" and
-  // "user switched to a different tab" without needing to close/reopen the
-  // panel. The storage.onChanged listener in bindEvents() picks up the result
-  // once the service worker writes it, the same path a fresh toolbar click uses.
-  chrome.runtime.sendMessage({ type: "REFRESH_PAGE_CAPTURE" }).catch(() => {});
+async function requestPageRefresh() {
+  app.inputMessage = "";
+  renderInputMessage();
+  const response = await requestFreshPageCapture(chrome);
+  if (!response.ok) {
+    app.inputMessage = response.message;
+    renderInputMessage();
+  }
 }
 
 async function loadPageData() {
@@ -195,37 +199,17 @@ async function loadPageData() {
   const key = `fc:page:${app.activeTabId}`;
   const stored = await chrome.storage.session.get(key);
   app.page = stored[key] || null;
-  await discardStaleJobIfPageChanged();
 }
 
 async function resetActiveJob() {
   // Shared by every case where the active job can no longer be trusted: the
   // server has no record of it (404 - almost always because api.py restarted
-  // and its in-memory JobManager lost every job it knew about, which happens
-  // often during local dev/testing), or the page underneath a finished
-  // page-mode check has changed. Always safe to call - never interrupts
-  // legitimate still-running work on its own, callers decide when it applies.
+  // and its in-memory JobManager lost every job it knew about). Page changes do
+  // not call this: the previous result stays visible until a new check starts.
   stopTransport();
   app.job = null;
   app.snapshot = normalizeSnapshot({ state: "idle" });
   await chrome.storage.session.remove(STORAGE.activeJob);
-}
-
-async function discardStaleJobIfPageChanged() {
-  // A finished page-mode check must never be left on screen once the page
-  // underneath it has changed - otherwise a completed check for one article
-  // silently looks like it applies to whatever's now open. Only touches
-  // *terminal* jobs (never interrupts one still running), and only keeps the
-  // results when the newly loaded page's URL positively matches the URL the
-  // job actually ran against - any other case (including a failed recapture,
-  // where the URL can't be confirmed) clears it rather than risk showing a
-  // fact-check result next to the wrong page.
-  if (!app.job || app.job.mode !== "page" || !isTerminalState(app.snapshot.state)) return;
-  const jobUrl = app.job.context?.url;
-  const currentUrl = app.page?.url || "";
-  if (currentUrl && jobUrl === currentUrl) return;
-
-  await resetActiveJob();
 }
 
 function isJobNotFound(error) {
@@ -365,13 +349,14 @@ function renderInputMessage() {
 function renderAction() {
   const running = isRunning();
   const terminal = Boolean(app.job) && isTerminalState(app.snapshot.state);
+  const newPage = hasNewPageSinceCheck(app.job, app.page, app.mode, terminal);
   // app.cancelPending only covers the DELETE request itself (a fraction of a
   // second); the job can stay in "cancelling" much longer than that if a
   // provider call was already in flight when cancel was requested (best-effort
   // cancellation - see chrome-extension.md). Both must disable/relabel the button,
   // or a slow cancellation looks identical to "Cancel check" doing nothing.
   const cancelling = app.cancelPending || app.snapshot.state === "cancelling";
-  let label = terminal ? "Recheck" : "Check claims";
+  let label = terminal ? (newPage ? "Check new page" : "Recheck") : "Check claims";
   let iconName = terminal ? "rotate-cw" : "search";
   let action = terminal ? "recheck" : "check";
 
@@ -446,6 +431,9 @@ function renderResults() {
   elements.resultsCount.textContent = slotCount
     ? `${results.length} of ${slotCount}`
     : "";
+  const checkedTitle = app.job?.mode === "page" ? String(app.job.context?.title || "").trim() : "";
+  elements.resultsContext.hidden = !checkedTitle;
+  elements.resultsContext.textContent = checkedTitle ? `Results for: ${checkedTitle}` : "";
 
   elements.exportActions.hidden = results.length === 0;
   if (results.length > 0) {
@@ -476,11 +464,21 @@ function renderResults() {
   );
 
   for (let index = 0; index < slotCount; index += 1) {
-    elements.resultsList.append(resultBySlot.has(index)
-      ? renderResult(resultBySlot.get(index))
-      : claimBySlot.has(index) && (terminal || errorBySlot.has(index))
-        ? renderFailedClaim(index, claimBySlot.get(index), errorBySlot.get(index))
-        : renderPlaceholder(index));
+    let card;
+    if (resultBySlot.has(index)) {
+      card = renderResult(resultBySlot.get(index));
+    } else if (claimBySlot.has(index) && (terminal || errorBySlot.has(index))) {
+      card = renderFailedClaim(index, claimBySlot.get(index), errorBySlot.get(index));
+    } else if (claimBySlot.has(index)) {
+      card = renderPendingClaim(
+        index,
+        claimBySlot.get(index),
+        app.snapshot.claimProgress?.[index] || "waiting",
+      );
+    } else {
+      card = renderPlaceholder(index);
+    }
+    elements.resultsList.append(card);
   }
 }
 
@@ -546,6 +544,27 @@ function renderPlaceholder(index) {
     node("div", "skeleton-line"),
   );
   return placeholder;
+}
+
+function renderPendingClaim(index, claim, stage) {
+  const [labelText, detail] = claimProgressCopy(stage);
+  const card = node("article", "result-card pending-claim");
+  card.dataset.verdict = "PENDING";
+  card.setAttribute("aria-label", `Claim ${index + 1}: ${labelText.toLowerCase()}`);
+  const header = node("div", "result-header");
+  const label = node("span", "verdict-label");
+  label.dataset.verdict = "PENDING";
+  label.append(
+    createIcon(stage === "waiting" ? "file-text" : "search", 14),
+    document.createTextNode(labelText),
+  );
+  header.append(label, node("span", "confidence", `Claim ${index + 1}`));
+  card.append(
+    header,
+    node("h3", "claim-text", claim.claim),
+    node("p", "explanation", detail),
+  );
+  return card;
 }
 
 function renderFailedClaim(index, claim, error) {

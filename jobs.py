@@ -79,6 +79,7 @@ class Job:
     results: list[Any] = field(default_factory=list)
     outcome: dict[str, Any] | None = None
     claims: list[dict[str, Any]] = field(default_factory=list)
+    claim_progress: dict[int, str] = field(default_factory=dict)
     evidence_by_claim: dict[int, dict[str, Any]] = field(default_factory=dict)
     retry_attempts: dict[int, int] = field(default_factory=dict)
     retrying_claim_index: int | None = None
@@ -249,6 +250,7 @@ class JobManager:
                     "claim_count": len(job.claims),
                     "retry": True,
                 }
+                job.claim_progress[claim_index] = job.progress["stage"]
                 job.updated_at = now
                 self._append_event(job, "status", {"status": "running"})
                 self._append_event(job, "progress", job.progress)
@@ -308,6 +310,11 @@ class JobManager:
             safe_value = copy.deepcopy(value) if isinstance(value, dict) else {"state": "updated"}
             with job.condition:
                 job.progress = safe_value
+                claim_index = safe_value.get("claim_index")
+                stage = safe_value.get("stage")
+                if (isinstance(claim_index, int) and claim_index >= 0
+                        and stage in {"searching", "verifying"}):
+                    job.claim_progress[claim_index] = stage
                 job.updated_at = self._clock()
                 self._append_event(job, "progress", safe_value)
 
@@ -315,6 +322,9 @@ class JobManager:
             safe_value = copy.deepcopy(value)
             with job.condition:
                 job.results.append(safe_value)
+                claim_index = safe_value.get("claim_index") if isinstance(safe_value, dict) else None
+                if isinstance(claim_index, int) and claim_index >= 0:
+                    job.claim_progress[claim_index] = "complete"
                 job.updated_at = self._clock()
                 self._append_event(job, "result", safe_value)
 
@@ -327,7 +337,20 @@ class JobManager:
             ]
             with job.condition:
                 job.claims = safe_claims
+                job.claim_progress = {index: "waiting" for index in range(len(safe_claims))}
                 job.updated_at = self._clock()
+                public_claims = [
+                    {
+                        "claim_index": index,
+                        "claim": claim.get("claim", ""),
+                        "speaker": claim.get("speaker", "UNKNOWN"),
+                    }
+                    for index, claim in enumerate(safe_claims)
+                ]
+                self._append_event(job, "claims", {
+                    "claim_count": len(public_claims),
+                    "claims": public_claims,
+                })
 
         def on_evidence(value: Any) -> None:
             if not isinstance(value, dict):
@@ -428,6 +451,9 @@ class JobManager:
             safe_value["retry"] = True
             with job.condition:
                 job.progress = safe_value
+                stage = safe_value.get("stage")
+                if stage in {"searching", "verifying"}:
+                    job.claim_progress[claim_index] = stage
                 job.updated_at = self._clock()
                 self._append_event(job, "progress", safe_value)
 
@@ -483,6 +509,7 @@ class JobManager:
                 ]
                 job.results.append(verdict)
                 job.results.sort(key=lambda value: value.get("claim_index", 0))
+                job.claim_progress[claim_index] = "complete"
                 self._append_event(job, "result", verdict)
                 errors = previous_errors
             elif outcome.get("status") == "cancelled":
@@ -571,6 +598,7 @@ class JobManager:
                 }
                 for index, claim in enumerate(job.claims)
             ],
+            "claim_progress": copy.deepcopy(job.claim_progress),
             "retrying_claim_index": job.retrying_claim_index,
             "retry_attempts": copy.deepcopy(job.retry_attempts),
             "claim_retry_limit": self.claim_retry_limit,

@@ -322,6 +322,14 @@ section {
   margin-bottom: 12px;
 }
 
+.results-context {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 .secondary-action {
   min-height: 44px;
   padding: 8px 10px;
@@ -549,6 +557,11 @@ section {
   border-left-color: var(--red);
 }
 
+.result-card[data-verdict="PENDING"] {
+  min-height: 128px;
+  border-left-color: var(--blue);
+}
+
 .result-header {
   display: flex;
   align-items: center;
@@ -585,6 +598,11 @@ section {
 .verdict-label[data-verdict="FAILED"] {
   color: var(--red);
   background: var(--red-soft);
+}
+
+.verdict-label[data-verdict="PENDING"] {
+  color: var(--blue);
+  background: var(--blue-soft);
 }
 
 .confidence {

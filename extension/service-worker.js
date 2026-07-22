@@ -13,16 +13,15 @@ chrome.action.onClicked.addListener((tab) => {
   void capturePage(tab);
 });
 
-// Re-invoked from the side panel's Refresh button - a fresh user gesture, so it
-// qualifies for a new activeTab grant on whatever tab is currently focused, the
-// same way clicking the toolbar action does. This is how re-reading the page
-// works without re-requesting broader "tabs"/host permissions.
+// Re-invoked from the side panel's Refresh button after the panel requests its
+// optional page-access permission. activeTab alone is not enough here: Chrome
+// grants it for toolbar invocation, not for a button inside an extension page.
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "REFRESH_PAGE_CAPTURE") {
-    void chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
-      if (tab && Number.isInteger(tab.id)) void capturePage(tab);
+    void captureActivePage().then(sendResponse).catch(() => {
+      sendResponse({ ok: false, message: "The active browser tab could not be found." });
     });
-    return undefined;
+    return true;
   }
 
   if (message?.type === "FIND_CLAIM_ON_PAGE") {
@@ -32,6 +31,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   return undefined;
 });
+
+async function captureActivePage() {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab || !Number.isInteger(tab.id)) {
+    return { ok: false, message: "The active browser tab could not be found." };
+  }
+  await capturePage(tab);
+  return { ok: true, tabId: tab.id };
+}
 
 async function findClaimOnPage(message) {
   const tabId = message?.tabId;

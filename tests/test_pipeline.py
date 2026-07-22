@@ -7,6 +7,24 @@ from types import SimpleNamespace
 import fact_checker
 
 
+class FakeChatStream:
+    def __init__(self, *parts):
+        self.parts = parts
+        self.closed = False
+
+    def __iter__(self):
+        return iter([
+            SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=part))])
+            for part in self.parts
+        ])
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        self.closed = True
+
+
 def extraction_payload(count):
     return json.dumps([
         {"claim": f"claim-{index}", "query": f"query-{index}", "speaker": f"speaker-{index}"}
@@ -515,9 +533,7 @@ def test_tavily_timeout_retries_are_bounded(monkeypatch):
 
 def test_deepinfra_chat_has_an_explicit_request_timeout(monkeypatch):
     captured = {}
-    response = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content="[]"))]
-    )
+    response = FakeChatStream("[", "]")
     completions = SimpleNamespace(
         create=lambda **kwargs: captured.update(kwargs) or response
     )
@@ -526,13 +542,13 @@ def test_deepinfra_chat_has_an_explicit_request_timeout(monkeypatch):
 
     assert fact_checker._chat("system", "user", 12) == "[]"
     assert captured["timeout"] == fact_checker.DEEPINFRA_TIMEOUT_SECONDS
+    assert captured["stream"] is True
+    assert response.closed is True
 
 
 def test_deepinfra_timeout_uses_only_the_remaining_job_budget(monkeypatch):
     captured = {}
-    response = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content="[]"))]
-    )
+    response = FakeChatStream("[]")
     completions = SimpleNamespace(
         create=lambda **kwargs: captured.update(kwargs) or response
     )
@@ -542,6 +558,34 @@ def test_deepinfra_timeout_uses_only_the_remaining_job_budget(monkeypatch):
     deadline = time.monotonic() + 5
     assert fact_checker._chat("system", "user", 12, deadline=deadline) == "[]"
     assert 0 < captured["timeout"] <= 5
+
+
+def test_deepinfra_stream_closes_when_job_deadline_expires(monkeypatch):
+    remaining_checks = 0
+    response = FakeChatStream("partial", " response")
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+        create=lambda **_kwargs: response,
+    )))
+
+    def remaining(_deadline):
+        nonlocal remaining_checks
+        remaining_checks += 1
+        if remaining_checks == 1:
+            return 5.0
+        raise fact_checker.WholeJobDeadlineExceeded()
+
+    monkeypatch.setattr(fact_checker, "_deepinfra_", lambda: client)
+    monkeypatch.setattr(fact_checker, "_remaining_seconds", remaining)
+
+    try:
+        fact_checker._chat("system", "user", 12, deadline=time.monotonic() + 5)
+    except fact_checker.WholeJobDeadlineExceeded:
+        pass
+    else:
+        raise AssertionError("expired whole-job deadline was not raised")
+
+    assert response.closed is True
+    assert remaining_checks == 2
 
 
 def test_deepinfra_does_not_retry_after_whole_job_deadline(monkeypatch):

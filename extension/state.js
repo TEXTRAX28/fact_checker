@@ -94,6 +94,20 @@ function normalizeClaimManifest(value) {
   }));
 }
 
+function normalizeClaimProgress(value, previous = {}) {
+  const normalized = { ...previous };
+  if (!value || typeof value !== "object" || Array.isArray(value)) return normalized;
+  for (const [rawIndex, rawStage] of Object.entries(value)) {
+    const index = Number(rawIndex);
+    const stage = normalizeState(rawStage);
+    if (Number.isInteger(index) && index >= 0
+        && ["waiting", "searching", "verifying", "complete", "failed"].includes(stage)) {
+      normalized[index] = stage;
+    }
+  }
+  return normalized;
+}
+
 export function normalizeResult(result, fallbackIndex = 0) {
   const claimObject = result?.claim && typeof result.claim === "object" ? result.claim : null;
   const rawIndex = firstDefined(result?.claim_index, result?.index, result?.position, claimObject?.index);
@@ -182,6 +196,10 @@ export function normalizeSnapshot(raw = {}, previous = {}) {
     previous.claimManifest,
     [],
   ));
+  const claimProgress = normalizeClaimProgress(
+    firstDefined(raw.claim_progress, raw.claimProgress, {}),
+    previous.claimProgress || {},
+  );
   const rawRetryingIndex = raw.retrying_claim_index !== undefined
     ? raw.retrying_claim_index
     : firstDefined(raw.retryingClaimIndex, previous.retryingClaimIndex, null);
@@ -210,6 +228,7 @@ export function normalizeSnapshot(raw = {}, previous = {}) {
     errors,
     claimErrors,
     claimManifest,
+    claimProgress,
     retryingClaimIndex,
     retryAttempts: { ...(previous.retryAttempts || {}), ...(raw.retry_attempts || {}) },
     claimRetryLimit: Math.max(1, asNumber(firstDefined(
@@ -236,7 +255,8 @@ export function snapshotIsStale(raw, current = {}) {
 }
 
 // The backend's SSE stream (jobs.py::JobManager._append_event) only ever names an
-// event one of these four ways - "status" ({status}), "progress" (whatever
+// event one of these five ways - "status" ({status}), "claims" (the sanitized
+// extracted claim list), "progress" (whatever
 // on_progress emitted, e.g. {stage, state, claim_count?}), "result" (the verdict
 // dict itself, not nested under a "result" key), "terminal" ({status, outcome}).
 // Each needs different unpacking; there is no single "the event name is the stage"
@@ -253,11 +273,26 @@ export function mergeEvent(snapshot, data = {}, eventType = "") {
     return normalizeSnapshot(next, current);
   }
 
+  if (eventType === "claims") {
+    const claims = Array.isArray(data.claims) ? data.claims : [];
+    next.claimManifest = normalizeClaimManifest(claims);
+    next.claimCount = Math.max(current.claimCount, asNumber(data.claim_count, claims.length));
+    next.claimProgress = Object.fromEntries(
+      next.claimManifest.map((claim) => [claim.index, "waiting"]),
+    );
+    return normalizeSnapshot(next, current);
+  }
+
   if (eventType === "progress") {
     const stage = normalizeState(data.stage, current.stage);
     next.stage = stage;
     if (IN_FLIGHT_STAGES.has(stage)) next.state = stage;
     next.claimCount = Math.max(current.claimCount, asNumber(data.claim_count, current.claimCount));
+    const claimIndex = Number(data.claim_index);
+    if (Number.isInteger(claimIndex) && claimIndex >= 0
+        && ["searching", "verifying"].includes(stage)) {
+      next.claimProgress = { ...current.claimProgress, [claimIndex]: stage };
+    }
     if (data.message && stage === "warning") next.errors = [...current.errors, String(data.message)];
     return normalizeSnapshot(next, current);
   }
@@ -271,6 +306,7 @@ export function mergeEvent(snapshot, data = {}, eventType = "") {
     else results.push(normalized);
     next.results = results;
     next.completedCount = results.length;
+    next.claimProgress = { ...current.claimProgress, [normalized.index]: "complete" };
     next.state = "verifying";
     return normalizeSnapshot(next, current);
   }
@@ -345,11 +381,21 @@ export function compactSession(snapshot, job) {
     errors: snapshot?.errors || [],
     claimErrors: snapshot?.claimErrors || [],
     claimManifest: snapshot?.claimManifest || [],
+    claimProgress: snapshot?.claimProgress || {},
     retryingClaimIndex: snapshot?.retryingClaimIndex ?? null,
     retryAttempts: snapshot?.retryAttempts || {},
     claimRetryLimit: snapshot?.claimRetryLimit || 2,
     cached: Boolean(snapshot?.cached),
   };
+}
+
+export function claimProgressCopy(stage) {
+  const copy = {
+    waiting: ["DETECTED", "Not verified yet. Waiting for source search."],
+    searching: ["FINDING SOURCES", "Searching for relevant, reliable evidence."],
+    verifying: ["CHECKING EVIDENCE", "Comparing this claim against accepted evidence."],
+  };
+  return copy[normalizeState(stage)] || copy.waiting;
 }
 
 // Pure data-shaping for the Export buttons, kept here (not in sidepanel.js) so it's
