@@ -542,6 +542,7 @@ def test_deepinfra_chat_has_an_explicit_request_timeout(monkeypatch):
 
     assert fact_checker._chat("system", "user", 12) == "[]"
     assert captured["timeout"] == fact_checker.DEEPINFRA_TIMEOUT_SECONDS
+    assert captured["temperature"] == 0
     assert captured["stream"] is True
     assert response.closed is True
 
@@ -734,6 +735,33 @@ def test_verify_one_uses_one_based_source_references_in_explanation(monkeypatch)
     )
     assert verdict["explanation"] == (
         "Source [1] supports the claim; source [2] adds context. Keep [99]."
+    )
+
+
+def test_verify_one_enforces_english_when_model_replies_in_indonesian(monkeypatch):
+    captured = {}
+
+    def chat(_system, user, *_args, **_kwargs):
+        captured["user"] = user
+        return json.dumps([{
+            "claim": "x", "supported": True, "contradicted": False, "verdict": "TRUE",
+            "confidence": 90,
+            "explanation": "Pernyataan ini didukung oleh bukti yang tersedia dalam sumber.",
+            "source_analysis": [
+                {"source_index": 0, "stance": "SUPPORTS", "directness": "DIRECT"},
+            ],
+        }])
+
+    monkeypatch.setattr(fact_checker, "_chat", chat)
+    verdict = fact_checker._verify_one(
+        {"claim": "The available medical evidence directly supports this claim.",
+         "speaker": "X"},
+        "evidence", [one_source()],
+    )
+
+    assert "REQUIRED OUTPUT LANGUAGE: English" in captured["user"]
+    assert verdict["explanation"] == (
+        "The accepted evidence in source [1] directly supports this claim."
     )
 
 

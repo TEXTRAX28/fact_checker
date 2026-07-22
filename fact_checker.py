@@ -26,6 +26,23 @@ MAX_EVIDENCE_TOTAL_CHARS = 10_000
 VERIFY_BACKLOG_MULTIPLIER = 2
 RAW_RESPONSE_LOG_MAX_CHARS = 8_000
 
+_LANGUAGE_MARKERS = {
+    "English": frozenset({
+        "the", "and", "are", "is", "was", "were", "this", "that", "these",
+        "those", "to", "from", "for", "with", "without", "into", "because",
+        "when", "which", "can", "cannot", "could", "would", "should", "will",
+        "has", "have", "had", "you", "your", "their", "our", "not", "claim",
+        "evidence", "source", "supports", "contradicts",
+    }),
+    "Indonesian": frozenset({
+        "yang", "dan", "adalah", "merupakan", "ini", "itu", "tersebut", "dengan",
+        "tanpa", "karena", "ketika", "dari", "untuk", "pada", "dalam", "dapat",
+        "bisa", "tidak", "bukan", "akan", "telah", "sudah", "memiliki", "klaim",
+        "bukti", "sumber", "menyatakan", "namun", "tetapi", "secara", "bahwa",
+        "oleh", "hanya", "mendukung", "membantah",
+    }),
+}
+
 @contextmanager
 def _loading(message: str):
     # Prints "message." / "message.." / "message..." on a loop, overwriting the same
@@ -150,7 +167,7 @@ def _public_provider_error(stage: str, exc: Exception,
 _deepinfra_client = None
 _tavily = None
 
-MODEL = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+MODEL = "deepseek-ai/DeepSeek-V4-Flash"
 DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
 
 EXTRACT_PROMPT = """Extract up to 15 most specific and verifiable factual claims from the text.
@@ -207,7 +224,8 @@ Each object in the array must have:
   "explanation": 1-3 sentences, written in the SAME language as the claim text (e.g. claim in
                  Indonesian -> explanation in Indonesian, claim in English -> explanation in
                  English). Never mix languages within one explanation, regardless of what
-                 language the search results/sources are in.
+                 language the search results/sources are in. Write each source_analysis "reason"
+                 in that language too.
   "source_analysis": array with exactly one entry per numbered source shown in SEARCH
                       RESULTS below. Reference sources ONLY by the [N] index shown there -
                       never invent an index and never use a URL. Each entry:
@@ -361,6 +379,7 @@ def _chat(system: str, user: str, max_tokens: int, *, deadline: float | None = N
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
+                temperature=0,
                 stream=True,
                 timeout=_bounded_timeout(DEEPINFRA_TIMEOUT_SECONDS, deadline),
             )
@@ -641,6 +660,75 @@ def _one_based_source_references(explanation, source_count: int) -> str:
     return re.sub(r"\[(\d+)\]", replace, text)
 
 
+def _detect_supported_language(text, *, minimum_score: int = 3) -> str | None:
+    """Identify clear English/Indonesian prose without adding a runtime dependency."""
+    if not isinstance(text, str):
+        return None
+    words = re.findall(r"[^\W\d_]+", text.lower(), flags=re.UNICODE)
+    scores = {
+        language: sum(word in markers for word in words)
+        for language, markers in _LANGUAGE_MARKERS.items()
+    }
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    (language, score), (_, runner_up) = ranked
+    if score < minimum_score or score - runner_up < 2:
+        return None
+    return language
+
+
+def _source_reference_list(indices: list[int], language: str) -> str:
+    references = [f"[{index}]" for index in indices]
+    if len(references) < 2:
+        return references[0] if references else ""
+    conjunction = " dan " if language == "Indonesian" else " and "
+    return ", ".join(references[:-1]) + conjunction + references[-1]
+
+
+def _language_safe_explanation(verdict: str, source_analysis: list[dict],
+                               language: str) -> str:
+    """Produce a truthful fallback when model prose uses the wrong language."""
+    if verdict == "TRUE":
+        indices = [
+            entry["source_index"] for entry in source_analysis
+            if entry["stance"] == "SUPPORTS"
+        ]
+        references = _source_reference_list(indices, language)
+        if language == "Indonesian":
+            location = f" dalam sumber {references}" if references else ""
+            return f"Bukti yang diterima{location} secara langsung mendukung klaim ini."
+        location = f" in source {references}" if references else ""
+        return f"The accepted evidence{location} directly supports this claim."
+
+    if verdict == "FALSE":
+        indices = [
+            entry["source_index"] for entry in source_analysis
+            if entry["stance"] == "CONTRADICTS"
+        ]
+        references = _source_reference_list(indices, language)
+        if language == "Indonesian":
+            location = f" dalam sumber {references}" if references else ""
+            return f"Bukti yang diterima{location} secara langsung membantah klaim ini."
+        location = f" in source {references}" if references else ""
+        return f"The accepted evidence{location} directly contradicts this claim."
+
+    partial_indices = [
+        entry["source_index"] for entry in source_analysis
+        if entry["stance"] == "PARTIAL"
+    ]
+    references = _source_reference_list(partial_indices, language)
+    if language == "Indonesian":
+        if references:
+            return (f"Sumber {references} hanya membahas sebagian klaim, sehingga keseluruhan "
+                    "klaim tidak dapat diverifikasi.")
+        return ("Sumber yang tersedia tidak secara langsung membuktikan atau membantah "
+                "keseluruhan klaim ini.")
+    if references:
+        return (f"Source {references} addresses only part of the claim, so the full claim "
+                "cannot be verified.")
+    return ("The available sources do not directly establish or contradict the full claim, "
+            "so it remains unverifiable.")
+
+
 def _group_duplicate_sources(sources: list[dict]) -> list[int]:
     # Returns, per source, the index of the first source in its near-duplicate group
     # (itself, if it's first) - groups syndicated/wire-service copies so they don't
@@ -680,7 +768,8 @@ def _cap_confidence(confidence: int, *, independent_supports: int, has_contradic
 
 def _verify_one(claim: dict, search_text: str, sources: list[dict], verbose: bool = False,
                  claim_label: str = "", run_id: str = "",
-                 deadline: float | None = None) -> dict | None:
+                 deadline: float | None = None,
+                 document_language: str | None = None) -> dict | None:
     # One verify call per claim: keeps each verdict paired with its own search results (no positional zip drift) and lets callers reveal results as they land.
     if not search_text:
         # No search evidence at all (search failed or returned zero usable sources). Do not
@@ -690,9 +779,19 @@ def _verify_one(claim: dict, search_text: str, sources: list[dict], verbose: boo
         # error handling drops this claim from the results rather than showing a fake verdict.
         raise NoEvidenceError(f"no search evidence for claim: {claim['claim'][:60]!r}")
 
+    required_language = (
+        _detect_supported_language(claim["claim"]) or document_language
+    )
+    language_instruction = (
+        f"REQUIRED OUTPUT LANGUAGE: {required_language}. Write all generated prose in "
+        f"{required_language}, even if the sources use another language.\n"
+        if required_language else
+        "REQUIRED OUTPUT LANGUAGE: exactly match the language of the CLAIM, not the sources.\n"
+    )
     context = (f"SPEAKER: {claim.get('speaker', 'UNKNOWN')}\n"
                f"CLAIM: {claim['claim']}\n"
-               f"SEARCH RESULTS:\n{search_text}\n")
+               f"SEARCH RESULTS:\n{search_text}\n\n"
+               f"{language_instruction}")
     start = time.perf_counter()
     raw_reply = _chat(VERIFY_PROMPT, context, max_tokens=1000, deadline=deadline)
     if verbose:
@@ -805,6 +904,15 @@ def _verify_one(claim: dict, search_text: str, sources: list[dict], verbose: boo
         verdict["explanation"] = (verdict.get("explanation", "").rstrip() +
             f" (Verdict corrected to {verdict['verdict']} from the evidence fields.)")
 
+    explanation = verdict.get("explanation")
+    explanation_language = _detect_supported_language(explanation, minimum_score=2)
+    if (required_language and
+            (not isinstance(explanation, str) or not explanation.strip()
+             or (explanation_language and explanation_language != required_language))):
+        verdict["explanation"] = _language_safe_explanation(
+            verdict["verdict"], source_analysis, required_language
+        )
+
     verdict["explanation"] = _one_based_source_references(
         verdict.get("explanation"), len(sources)
     )
@@ -857,6 +965,8 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
         print("Input too short to fact-check, give more sentences to fact-check")
         return finish("invalid_input")
 
+    document_language = _detect_supported_language(transcript)
+
     progress("extracting_claims", state="started")
     try:
         start = time.perf_counter()
@@ -868,7 +978,7 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
                 elapsed=time.perf_counter() - start, body=raw,
             )
         else:
-            with _loading("Extracting claims (Llama 3.3 70B via DeepInfra)"):
+            with _loading("Extracting claims (DeepSeek V4 Flash via DeepInfra)"):
                 raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=4000, deadline=deadline)
     except Exception as exc:
         print(f"[ERROR] Extraction: {type(exc).__name__}: {exc}")
@@ -904,7 +1014,7 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
         return finish("timeout", claim_count=len(claims))
 
     print(f"Found {len(claims)} claim(s).")
-    print(f"Verifying {len(claims)} claim(s) (Llama 3.3 70B via DeepInfra)...\n")
+    print(f"Verifying {len(claims)} claim(s) (DeepSeek V4 Flash via DeepInfra)...\n")
 
     search_limit = max(1, min(int(search_workers), len(claims)))
     verify_limit = max(1, min(int(verify_workers), len(claims)))
@@ -966,7 +1076,7 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
                 return
             future = verify_pool.submit(
                 _verify_one, claims[claim_index], search_text, sources, verbose,
-                f"{claim_index + 1}/{len(claims)}", run_id, deadline,
+                f"{claim_index + 1}/{len(claims)}", run_id, deadline, document_language,
             )
             verify_futures[future] = claim_index
 

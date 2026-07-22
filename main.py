@@ -69,7 +69,7 @@ def main() -> None:
     args = parser.parse_args()
 
     print("Fact Checker")
-    print("Model: Llama 3.3 70B (DeepInfra)\n")
+    print("Model: DeepSeek V4 Flash (DeepInfra)\n")
     print("Input mode:")
     print("  1. Article URL")
     print("  2. Paste Text")

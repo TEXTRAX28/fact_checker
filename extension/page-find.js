@@ -1,5 +1,9 @@
 const WORD_PATTERN = /[\p{L}\p{N}]+/gu;
-const MIN_FALLBACK_WORDS = 6;
+const NUMBER_PATTERN = /(?:[$\u20ac\u00a3]\s*)?\d+(?:[.,]\d+)*(?:\s*%)?/gu;
+const MIN_LONG_FALLBACK_WORDS = 6;
+const SHORT_FALLBACK_WORDS = 5;
+const MAX_SHORT_CANDIDATES = 32;
+const MAX_NUMBER_CANDIDATES = 8;
 const MAX_FALLBACK_WORDS = 12;
 const MAX_CANDIDATES = 80;
 
@@ -9,19 +13,60 @@ export function claimSearchCandidates(value) {
 
   const candidates = [claim];
   const words = [...claim.matchAll(WORD_PATTERN)];
-  if (words.length < MIN_FALLBACK_WORDS) return candidates;
+  if (words.length < SHORT_FALLBACK_WORDS) return candidates;
+
+  // Long claims can produce hundreds of sliding windows. Reserve space for
+  // shorter phrases from across the entire claim before filling the remaining
+  // budget with longer, more precise matches. Otherwise the cap is exhausted
+  // near the beginning and paraphrased text later in the claim is never tried.
+  const shortCandidates = [];
+  const shortWindowCount = words.length - SHORT_FALLBACK_WORDS + 1;
+  const shortStarts = sampledStarts(shortWindowCount, MAX_SHORT_CANDIDATES);
+  for (const start of shortStarts) {
+    shortCandidates.push(phraseAt(claim, words, start, SHORT_FALLBACK_WORDS));
+  }
+
+  const numberCandidates = [...claim.matchAll(NUMBER_PATTERN)]
+    .map((match) => match[0].trim())
+    .filter((value, index, values) => value && values.indexOf(value) === index)
+    .slice(0, MAX_NUMBER_CANDIDATES);
+
+  const longBudget = Math.max(
+    0,
+    MAX_CANDIDATES - candidates.length - shortCandidates.length - numberCandidates.length,
+  );
+  const longCandidates = [];
 
   const longest = Math.min(MAX_FALLBACK_WORDS, words.length);
-  for (let length = longest; length >= MIN_FALLBACK_WORDS; length -= 1) {
+  for (let length = longest; length >= MIN_LONG_FALLBACK_WORDS; length -= 1) {
     for (let start = 0; start + length <= words.length; start += 1) {
-      const first = words[start];
-      const last = words[start + length - 1];
-      const phrase = claim.slice(first.index, last.index + last[0].length);
-      if (!candidates.includes(phrase)) candidates.push(phrase);
-      if (candidates.length >= MAX_CANDIDATES) return candidates;
+      const phrase = phraseAt(claim, words, start, length);
+      if (!longCandidates.includes(phrase)) longCandidates.push(phrase);
+      if (longCandidates.length >= longBudget) break;
     }
+    if (longCandidates.length >= longBudget) break;
+  }
+
+  for (const phrase of [...longCandidates, ...shortCandidates, ...numberCandidates]) {
+    if (!candidates.includes(phrase)) candidates.push(phrase);
+    if (candidates.length >= MAX_CANDIDATES) break;
   }
   return candidates;
+}
+
+function phraseAt(claim, words, start, length) {
+  const first = words[start];
+  const last = words[start + length - 1];
+  return claim.slice(first.index, last.index + last[0].length);
+}
+
+function sampledStarts(count, limit) {
+  if (count <= limit) return Array.from({ length: count }, (_, index) => index);
+  const starts = Array.from(
+    { length: limit },
+    (_, index) => Math.round(index * (count - 1) / (limit - 1)),
+  );
+  return [...new Set(starts)];
 }
 
 export function samePageUrl(actual, expected) {

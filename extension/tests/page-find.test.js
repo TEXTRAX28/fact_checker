@@ -14,11 +14,21 @@ test("claimSearchCandidates adds long distinctive phrases while preserving punct
     "Trump announced tariffs on wine, hockey sticks, cement, and several industrial products from Canada.",
   );
   assert.ok(candidates.some((candidate) => candidate.includes("wine, hockey sticks, cement")));
-  assert.ok(candidates.every((candidate) => candidate.split(/\s+/).length >= 6));
 });
 
 test("claimSearchCandidates does not fall back to short generic fragments", () => {
   assert.deepEqual(claimSearchCandidates("Tariffs increased yesterday."), ["Tariffs increased yesterday."]);
+});
+
+test("claimSearchCandidates finds paraphrased adjacent sentences using shorter anchors", () => {
+  const candidates = claimSearchCandidates(
+    "Canada's supply management system sets limits on foreign imports, with tariffs upwards of 300% for those that exceed the limit",
+  );
+
+  assert.ok(candidates.includes("Canada's supply management system"));
+  assert.ok(candidates.includes("those that exceed the limit"));
+  assert.ok(candidates.includes("300%"));
+  assert.ok(candidates.length <= 80);
 });
 
 test("samePageUrl ignores fragments but not different queries or paths", () => {
