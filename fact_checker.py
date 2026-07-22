@@ -18,6 +18,8 @@ MAX_CLAIMS = 15
 MIN_INPUT_NON_WHITESPACE = 10
 DEEPINFRA_TIMEOUT_SECONDS = 40.0
 TAVILY_TIMEOUT_SECONDS = 15.0
+WHOLE_JOB_DEADLINE_SECONDS = 300.0
+CLAIM_RETRY_DEADLINE_SECONDS = 60.0
 PROVIDER_MAX_RETRIES = 2
 MAX_EVIDENCE_PER_SOURCE_CHARS = 4_000
 MAX_EVIDENCE_TOTAL_CHARS = 10_000
@@ -56,6 +58,10 @@ class NoEvidenceError(Exception):
 
 class ProviderProtocolError(Exception):
     """Raised when provider output does not satisfy the expected JSON protocol."""
+
+
+class WholeJobDeadlineExceeded(TimeoutError):
+    """Raised when the complete fact-check has exhausted its wall-clock budget."""
 
 
 class FactCheckResult(list):
@@ -101,9 +107,33 @@ def _is_retryable(exc: Exception) -> bool:
             or (status_code is not None and status_code >= 500))
 
 
+def _remaining_seconds(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise WholeJobDeadlineExceeded("The fact-check exceeded its time limit.")
+    return remaining
+
+
+def _bounded_timeout(limit: float, deadline: float | None) -> float:
+    remaining = _remaining_seconds(deadline)
+    return limit if remaining is None else min(limit, remaining)
+
+
+def _sleep_before_retry(attempt: int, deadline: float | None) -> None:
+    delay = 0.1 * (attempt + 1)
+    remaining = _remaining_seconds(deadline)
+    if remaining is not None and remaining <= delay:
+        raise WholeJobDeadlineExceeded("The fact-check exceeded its time limit.")
+    time.sleep(delay)
+
+
 def _public_provider_error(stage: str, exc: Exception,
                            claim_index: int | None = None) -> dict:
-    if _is_rate_limited(exc):
+    if isinstance(exc, WholeJobDeadlineExceeded):
+        code, message = "job_deadline_exceeded", "The fact-check exceeded its time limit."
+    elif _is_rate_limited(exc):
         code, message = "provider_rate_limited", "A provider rate limit was reached."
     elif _is_timeout(exc):
         code, message = "provider_timeout", "A provider request timed out."
@@ -293,7 +323,8 @@ def _deepinfra_():
             api_key=os.getenv("DEEPINFRA_API_KEY"),
             base_url=DEEPINFRA_BASE_URL,
             timeout=DEEPINFRA_TIMEOUT_SECONDS,
-            max_retries=PROVIDER_MAX_RETRIES,
+            # Retry here, where the whole-job budget can stop another attempt.
+            max_retries=0,
         )
     return _deepinfra_client
 
@@ -304,21 +335,27 @@ def _tavily_():
         _tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
     return _tavily
 
-def _chat(system: str, user: str, max_tokens: int) -> str:
-    try:
-        response = _deepinfra_().chat.completions.create(
-            model=MODEL,
-            max_tokens=max_tokens,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            timeout=DEEPINFRA_TIMEOUT_SECONDS,
-        )
-        return response.choices[0].message.content or ""
-    except Exception as e:
-        print(f"[ERROR] DeepInfra: {type(e).__name__}: {e}")
-        raise
+def _chat(system: str, user: str, max_tokens: int, *, deadline: float | None = None) -> str:
+    for attempt in range(PROVIDER_MAX_RETRIES + 1):
+        try:
+            response = _deepinfra_().chat.completions.create(
+                model=MODEL,
+                max_tokens=max_tokens,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                timeout=_bounded_timeout(DEEPINFRA_TIMEOUT_SECONDS, deadline),
+            )
+            return response.choices[0].message.content or ""
+        except Exception as exc:
+            print(f"[ERROR] DeepInfra attempt {attempt + 1}: {type(exc).__name__}: {exc}")
+            if (isinstance(exc, WholeJobDeadlineExceeded)
+                    or attempt >= PROVIDER_MAX_RETRIES
+                    or not _is_retryable(exc)):
+                raise
+            _sleep_before_retry(attempt, deadline)
+    raise AssertionError("DeepInfra retry loop exhausted without returning or raising.")
 
 def _parse_provider_array(text: str) -> tuple[list, bool]:
     text = re.sub(r"```(?:json)?\n?|```", "", text)
@@ -422,7 +459,8 @@ def _filter_sources(results: list[dict]) -> list[dict]:
 def _score(r: dict) -> float:
     return r.get("score", 0)
 
-def _search(query: str, claim_label: str = "", verbose: bool = False, run_id: str = "") -> tuple[str, list[dict]]:
+def _search(query: str, claim_label: str = "", verbose: bool = False,
+            run_id: str = "", deadline: float | None = None) -> tuple[str, list[dict]]:
     # Low-quality/UGC domains excluded at the Tavily, not filtered after the fact check.
     start = time.perf_counter()
     for attempt in range(PROVIDER_MAX_RETRIES + 1):
@@ -433,14 +471,16 @@ def _search(query: str, claim_label: str = "", verbose: bool = False, run_id: st
                 exclude_domains=list(_LOW_QUALITY),
                 search_depth="advanced",
                 include_raw_content="markdown",
-                timeout=TAVILY_TIMEOUT_SECONDS,
+                timeout=_bounded_timeout(TAVILY_TIMEOUT_SECONDS, deadline),
             )
             break
         except Exception as exc:
             print(f"[ERROR] Tavily attempt {attempt + 1}: {type(exc).__name__}: {exc}")
-            if attempt >= PROVIDER_MAX_RETRIES or not _is_retryable(exc):
+            if (isinstance(exc, WholeJobDeadlineExceeded)
+                    or attempt >= PROVIDER_MAX_RETRIES
+                    or not _is_retryable(exc)):
                 raise
-            time.sleep(0.1 * (attempt + 1))
+            _sleep_before_retry(attempt, deadline)
     raw_results = response.get("results", [])
 
     passed = []
@@ -572,6 +612,17 @@ def _verify_evidence_excerpt(excerpt: str | None, source_content: str) -> bool:
     return normalize(excerpt) in normalize(source_content)
 
 
+def _one_based_source_references(explanation, source_count: int) -> str:
+    """Convert the model's zero-based evidence citations for display."""
+    text = explanation if isinstance(explanation, str) else ""
+
+    def replace(match: re.Match) -> str:
+        index = int(match.group(1))
+        return f"[{index + 1}]" if index < source_count else match.group(0)
+
+    return re.sub(r"\[(\d+)\]", replace, text)
+
+
 def _group_duplicate_sources(sources: list[dict]) -> list[int]:
     # Returns, per source, the index of the first source in its near-duplicate group
     # (itself, if it's first) - groups syndicated/wire-service copies so they don't
@@ -610,7 +661,8 @@ def _cap_confidence(confidence: int, *, independent_supports: int, has_contradic
 
 
 def _verify_one(claim: dict, search_text: str, sources: list[dict], verbose: bool = False,
-                 claim_label: str = "", run_id: str = "") -> dict | None:
+                 claim_label: str = "", run_id: str = "",
+                 deadline: float | None = None) -> dict | None:
     # One verify call per claim: keeps each verdict paired with its own search results (no positional zip drift) and lets callers reveal results as they land.
     if not search_text:
         # No search evidence at all (search failed or returned zero usable sources). Do not
@@ -624,7 +676,7 @@ def _verify_one(claim: dict, search_text: str, sources: list[dict], verbose: boo
                f"CLAIM: {claim['claim']}\n"
                f"SEARCH RESULTS:\n{search_text}\n")
     start = time.perf_counter()
-    raw_reply = _chat(VERIFY_PROMPT, context, max_tokens=1000)
+    raw_reply = _chat(VERIFY_PROMPT, context, max_tokens=1000, deadline=deadline)
     if verbose:
         # One print() call, not several: this claim's verify runs in its own worker thread
         # alongside every other claim's, so bundling done-time + raw text into a single write
@@ -735,22 +787,41 @@ def _verify_one(claim: dict, search_text: str, sources: list[dict], verbose: boo
         verdict["explanation"] = (verdict.get("explanation", "").rstrip() +
             f" (Verdict corrected to {verdict['verdict']} from the evidence fields.)")
 
+    verdict["explanation"] = _one_based_source_references(
+        verdict.get("explanation"), len(sources)
+    )
+
     return verdict
 
 def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_progress=None,
-               cancel_event=None, search_workers: int = SEARCH_WORKERS,
-               verify_workers: int = VERIFY_WORKERS) -> FactCheckResult:
+               on_claims=None, on_evidence=None, cancel_event=None,
+               search_workers: int = SEARCH_WORKERS,
+               verify_workers: int = VERIFY_WORKERS,
+               deadline: float | None = None) -> FactCheckResult:
     """Extract, search, and verify claims while retaining the legacy list interface."""
     errors: list[dict] = []
     # Only used to label --verbose's raw-response terminal blocks so multiple runs in
     # the same terminal scrollback can be told apart - not a real job/check identity.
     run_id = secrets.token_hex(4)
+    if deadline is None:
+        deadline = time.monotonic() + WHOLE_JOB_DEADLINE_SECONDS
+    deadline_reported = False
 
     def progress(stage: str, **details) -> None:
         _safe_callback(on_progress, {"stage": stage, **details}, "Progress")
 
     def cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
+
+    def deadline_expired() -> bool:
+        return time.monotonic() >= deadline
+
+    def report_deadline() -> None:
+        nonlocal deadline_reported
+        if deadline_reported:
+            return
+        deadline_reported = True
+        errors.append(_public_provider_error("pipeline", WholeJobDeadlineExceeded()))
 
     def finish(status: str, values=(), claim_count: int = 0) -> FactCheckResult:
         result = FactCheckResult(values, status=status, claim_count=claim_count, errors=errors)
@@ -760,6 +831,9 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
 
     if cancelled():
         return finish("cancelled")
+    if deadline_expired():
+        report_deadline()
+        return finish("timeout")
     if (not isinstance(transcript, str)
             or sum(not char.isspace() for char in transcript) < MIN_INPUT_NON_WHITESPACE):
         print("Input too short to fact-check, give more sentences to fact-check")
@@ -769,7 +843,7 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
     try:
         start = time.perf_counter()
         if verbose:
-            raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=4000)
+            raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=4000, deadline=deadline)
             _print_raw_response(
                 run_id=run_id, claim_label="-", provider="deepinfra",
                 operation="claim_extraction", attempt=1,
@@ -777,7 +851,7 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
             )
         else:
             with _loading("Extracting claims (Llama 3.3 70B via DeepInfra)"):
-                raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=4000)
+                raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=4000, deadline=deadline)
     except Exception as exc:
         print(f"[ERROR] Extraction: {type(exc).__name__}: {exc}")
         errors.append(_public_provider_error("extraction", exc))
@@ -803,9 +877,13 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
         errors.append(_public_provider_error("extraction", exc))
         return finish("failed")
     progress("extracting_claims", state="completed", claim_count=len(claims))
+    _safe_callback(on_claims, [dict(claim) for claim in claims], "Claims")
     if not claims:
         print("No checkable factual claims found, looks like opinion, prediction, or too vague.")
         return finish("no_claims")
+    if deadline_expired():
+        report_deadline()
+        return finish("timeout", claim_count=len(claims))
 
     print(f"Found {len(claims)} claim(s).")
     print(f"Verifying {len(claims)} claim(s) (Llama 3.3 70B via DeepInfra)...\n")
@@ -830,6 +908,7 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
     rate_limited_count = 0
     dropped_count = 0
     was_cancelled = False
+    deadline_reached = False
 
     def record_error(stage: str, claim_index: int, exc: Exception) -> None:
         nonlocal failed_count, timeout_count, rate_limited_count
@@ -844,7 +923,7 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
 
     def submit_searches() -> None:
         nonlocal next_search
-        while (not cancelled() and next_search < len(claims)
+        while (not cancelled() and not deadline_expired() and next_search < len(claims)
                and len(search_futures) < search_limit
                and (len(search_futures) + len(verify_futures)
                     + len(pending_verifications)) < verify_backlog_limit):
@@ -853,13 +932,14 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
             progress("searching", state="started", claim_index=claim_index,
                      claim_count=len(claims))
             future = search_pool.submit(
-                _search, claim["query"], f"{claim_index + 1}/{len(claims)}", verbose, run_id
+                _search, claim["query"], f"{claim_index + 1}/{len(claims)}", verbose,
+                run_id, deadline,
             )
             search_futures[future] = claim_index
             next_search += 1
 
     def submit_verifications() -> None:
-        while (not cancelled() and pending_verifications
+        while (not cancelled() and not deadline_expired() and pending_verifications
                and len(verify_futures) < verify_backlog_limit):
             claim_index, search_text, sources = pending_verifications.pop(0)
             progress("verifying", state="started", claim_index=claim_index,
@@ -868,13 +948,14 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
                 return
             future = verify_pool.submit(
                 _verify_one, claims[claim_index], search_text, sources, verbose,
-                f"{claim_index + 1}/{len(claims)}", run_id,
+                f"{claim_index + 1}/{len(claims)}", run_id, deadline,
             )
             verify_futures[future] = claim_index
 
     submit_searches()
     try:
-        while search_futures or verify_futures or pending_verifications:
+        while (next_search < len(claims) or search_futures
+               or verify_futures or pending_verifications):
             if cancelled():
                 was_cancelled = True
                 break
@@ -882,12 +963,18 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
             submit_verifications()
             submit_searches()
 
+            active_futures = set(search_futures) | set(verify_futures)
+            remaining = max(0.0, deadline - time.monotonic())
             done, _ = wait(
-                set(search_futures) | set(verify_futures),
-                timeout=0.05,
+                active_futures,
+                timeout=min(0.05, remaining),
                 return_when=FIRST_COMPLETED,
             )
             if not done:
+                if deadline_expired():
+                    deadline_reached = True
+                    report_deadline()
+                    break
                 continue
 
             for future in done:
@@ -903,6 +990,10 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
                         break
                     try:
                         search_text, sources = future.result()
+                    except WholeJobDeadlineExceeded:
+                        deadline_reached = True
+                        report_deadline()
+                        continue
                     except Exception as exc:
                         if cancelled():
                             was_cancelled = True
@@ -915,6 +1006,11 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
                         if not search_text:
                             no_evidence_count += 1
                         else:
+                            _safe_callback(on_evidence, {
+                                "claim_index": claim_index,
+                                "search_text": search_text,
+                                "sources": sources,
+                            }, "Evidence")
                             pending_verifications.append((claim_index, search_text, sources))
                             submit_verifications()
                     submit_searches()
@@ -934,6 +1030,10 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
                         break
                     no_evidence_count += 1
                     submit_searches()
+                    continue
+                except WholeJobDeadlineExceeded:
+                    deadline_reached = True
+                    report_deadline()
                     continue
                 except Exception as exc:
                     if cancelled():
@@ -962,8 +1062,10 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
                 if not cancelled():
                     _safe_callback(on_result, verdict, "Result")
                 submit_searches()
+            if deadline_reached:
+                break
     finally:
-        if was_cancelled or cancelled():
+        if was_cancelled or cancelled() or deadline_reached:
             was_cancelled = True
             for future in list(search_futures) + list(verify_futures):
                 future.cancel()
@@ -974,6 +1076,8 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
             search_pool.shutdown(wait=True, cancel_futures=True)
             verify_pool.shutdown(wait=True, cancel_futures=True)
 
+    if deadline_reached:
+        return finish("partial" if results else "timeout", results, len(claims))
     if was_cancelled:
         return finish("cancelled", results, len(claims))
     if results and len(results) == len(claims):
@@ -992,8 +1096,105 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
             print(f"{dropped_count} claim(s) dropped (confidence < 60).")
         print(f"Extracted {len(claims)} claim(s), but none could be verified with enough "
               "evidence, no source clearly confirmed or denied them.")
-        return finish("no_evidence", claim_count=len(claims))
-    return finish("failed", claim_count=len(claims))
+    return finish("no_evidence", claim_count=len(claims))
+
+
+def retry_claim(claim: dict, claim_index: int, *, evidence: dict | None = None,
+                on_progress=None, on_evidence=None, cancel_event=None,
+                deadline: float | None = None) -> FactCheckResult:
+    """Retry one previously extracted claim without running extraction again."""
+    if deadline is None:
+        deadline = time.monotonic() + CLAIM_RETRY_DEADLINE_SECONDS
+
+    def finish(status: str, values=(), errors=()) -> FactCheckResult:
+        result = FactCheckResult(values, status=status, claim_count=1, errors=list(errors))
+        _safe_callback(on_progress, {
+            "stage": "complete",
+            "status": status,
+            "claim_index": claim_index,
+            "completed_count": len(result),
+        }, "Progress")
+        return result
+
+    def failed(stage: str, exc: Exception) -> FactCheckResult:
+        error = _public_provider_error(stage, exc, claim_index)
+        if _is_rate_limited(exc):
+            status = "rate_limited"
+        elif _is_timeout(exc):
+            status = "timeout"
+        else:
+            status = "failed"
+        return finish(status, errors=[error])
+
+    if (not isinstance(claim, dict) or not claim.get("claim")
+            or not claim.get("query") or not isinstance(claim_index, int)
+            or claim_index < 0):
+        return failed("verification", ProviderProtocolError("invalid saved claim"))
+    if cancel_event is not None and cancel_event.is_set():
+        return finish("cancelled")
+
+    search_text = evidence.get("search_text") if isinstance(evidence, dict) else None
+    sources = evidence.get("sources") if isinstance(evidence, dict) else None
+    if not isinstance(search_text, str) or not search_text.strip() or not isinstance(sources, list):
+        _safe_callback(on_progress, {
+            "stage": "searching", "state": "started", "claim_index": claim_index,
+        }, "Progress")
+        try:
+            search_text, sources = _search(
+                claim["query"], f"retry-{claim_index + 1}", deadline=deadline
+            )
+        except Exception as exc:
+            return failed("search", exc)
+        _safe_callback(on_progress, {
+            "stage": "searching", "state": "completed", "claim_index": claim_index,
+        }, "Progress")
+        if not search_text:
+            return finish("no_evidence", errors=[{
+                "stage": "search",
+                "code": "claim_no_evidence",
+                "message": "No sufficient evidence was found for this claim.",
+                "claim_index": claim_index,
+            }])
+        _safe_callback(on_evidence, {
+            "claim_index": claim_index,
+            "search_text": search_text,
+            "sources": sources,
+        }, "Evidence")
+
+    if cancel_event is not None and cancel_event.is_set():
+        return finish("cancelled")
+
+    _safe_callback(on_progress, {
+        "stage": "verifying", "state": "started", "claim_index": claim_index,
+    }, "Progress")
+    try:
+        verdict = _verify_one(
+            claim, search_text, sources, claim_label=f"retry-{claim_index + 1}",
+            run_id=secrets.token_hex(4), deadline=deadline,
+        )
+    except NoEvidenceError:
+        return finish("no_evidence", errors=[{
+            "stage": "verification",
+            "code": "claim_no_evidence",
+            "message": "No sufficient evidence was found for this claim.",
+            "claim_index": claim_index,
+        }])
+    except Exception as exc:
+        return failed("verification", exc)
+    if cancel_event is not None and cancel_event.is_set():
+        return finish("cancelled")
+    if verdict is None:
+        return failed(
+            "verification", ProviderProtocolError("verification returned no verdict")
+        )
+
+    verdict["claim"] = claim["claim"]
+    verdict["speaker"] = claim.get("speaker", "UNKNOWN")
+    verdict["claim_index"] = claim_index
+    _safe_callback(on_progress, {
+        "stage": "verifying", "state": "completed", "claim_index": claim_index,
+    }, "Progress")
+    return finish("completed", [verdict])
 
 if __name__ == "__main__":
     # Self-check: _parse_json_array must survive the malformed JSON the LLM actually emits.
@@ -1136,4 +1337,3 @@ if __name__ == "__main__":
 
     print("OK: all self-checks pass")
     
-

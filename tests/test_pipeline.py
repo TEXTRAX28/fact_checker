@@ -36,6 +36,22 @@ def one_source(url="https://example.com", content="Evidence text.", **overrides)
     return source
 
 
+def test_provider_json_parser_repairs_invalid_backslash_escapes():
+    raw = (
+        '[{"claim":"The citation is 607 U.S. \\_\\_\\_ (2025).",'
+        '"query":"607 U.S. 2025 citation","speaker":"SPEAKER_A"}]'
+    )
+
+    parsed, protocol_valid = fact_checker._parse_provider_array(raw)
+
+    assert protocol_valid is True
+    assert parsed == [{
+        "claim": "The citation is 607 U.S. ___ (2025).",
+        "query": "607 U.S. 2025 citation",
+        "speaker": "SPEAKER_A",
+    }]
+
+
 def test_callback_exceptions_do_not_discard_pipeline_results(monkeypatch):
     monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: extraction_payload(1))
     monkeypatch.setattr(
@@ -223,6 +239,75 @@ def test_provider_timeout_has_distinct_status(monkeypatch):
     result = fact_checker.fact_check("A sufficiently long factual sentence.", verbose=True)
 
     assert result.status == "timeout"
+
+
+def test_expired_whole_job_deadline_stops_before_extraction(monkeypatch):
+    monkeypatch.setattr(
+        fact_checker,
+        "_chat",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("provider was called")),
+    )
+
+    result = fact_checker.fact_check(
+        "A sufficiently long factual sentence.",
+        verbose=True,
+        deadline=time.monotonic() - 1,
+    )
+
+    assert result.status == "timeout"
+    assert result.errors == [{
+        "stage": "pipeline",
+        "code": "job_deadline_exceeded",
+        "message": "The fact-check exceeded its time limit.",
+    }]
+
+
+def test_deadline_expiring_during_extraction_does_not_start_search(monkeypatch):
+    def slow_extraction(*_args, **_kwargs):
+        time.sleep(0.03)
+        return extraction_payload(1)
+
+    monkeypatch.setattr(fact_checker, "_chat", slow_extraction)
+    monkeypatch.setattr(
+        fact_checker,
+        "_search",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("search was called")),
+    )
+
+    result = fact_checker.fact_check(
+        "A sufficiently long factual sentence.",
+        verbose=True,
+        deadline=time.monotonic() + 0.01,
+    )
+
+    assert result.status == "timeout"
+    assert result.claim_count == 1
+    assert result.errors[0]["code"] == "job_deadline_exceeded"
+
+
+def test_whole_job_deadline_preserves_completed_verdicts(monkeypatch):
+    monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: extraction_payload(2))
+    monkeypatch.setattr(
+        fact_checker, "_search", lambda *_args, **_kwargs: ("evidence", [one_source()])
+    )
+
+    def verify(claim, *_args, **_kwargs):
+        if claim["claim"] == "claim-1":
+            time.sleep(0.4)
+        return verdict_for(claim)
+
+    monkeypatch.setattr(fact_checker, "_verify_one", verify)
+
+    result = fact_checker.fact_check(
+        "A sufficiently long factual sentence.",
+        verbose=True,
+        verify_workers=1,
+        deadline=time.monotonic() + 0.2,
+    )
+
+    assert result.status == "partial"
+    assert [item["claim"] for item in result] == ["claim-0"]
+    assert result.errors[0]["code"] == "job_deadline_exceeded"
 
 
 def test_claims_are_hard_capped_in_code(monkeypatch):
@@ -443,6 +528,47 @@ def test_deepinfra_chat_has_an_explicit_request_timeout(monkeypatch):
     assert captured["timeout"] == fact_checker.DEEPINFRA_TIMEOUT_SECONDS
 
 
+def test_deepinfra_timeout_uses_only_the_remaining_job_budget(monkeypatch):
+    captured = {}
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="[]"))]
+    )
+    completions = SimpleNamespace(
+        create=lambda **kwargs: captured.update(kwargs) or response
+    )
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    monkeypatch.setattr(fact_checker, "_deepinfra_", lambda: client)
+
+    deadline = time.monotonic() + 5
+    assert fact_checker._chat("system", "user", 12, deadline=deadline) == "[]"
+    assert 0 < captured["timeout"] <= 5
+
+
+def test_deepinfra_does_not_retry_after_whole_job_deadline(monkeypatch):
+    attempts = 0
+
+    def fail(**_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise TimeoutError("provider slow")
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=fail))
+    )
+    monkeypatch.setattr(fact_checker, "_deepinfra_", lambda: client)
+
+    try:
+        fact_checker._chat(
+            "system", "user", 12, deadline=time.monotonic() + 0.02
+        )
+    except fact_checker.WholeJobDeadlineExceeded:
+        pass
+    else:
+        raise AssertionError("expired whole-job deadline was not raised")
+
+    assert attempts == 1
+
+
 def test_all_malformed_verification_outputs_fail(monkeypatch):
     def chat(system, *_args, **_kwargs):
         if system == fact_checker.EXTRACT_PROMPT:
@@ -545,6 +671,99 @@ def test_verify_one_attaches_source_titles_not_bare_urls(monkeypatch):
     )
     assert verdict["sources"] == [{
         "url": "https://reuters.com/a", "title": "Tariffs announced", "domain": "reuters.com",
+    }]
+
+
+def test_verify_one_uses_one_based_source_references_in_explanation(monkeypatch):
+    monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: json.dumps([{
+        "claim": "x", "supported": True, "contradicted": False, "verdict": "TRUE",
+        "confidence": 90,
+        "explanation": "Source [0] supports the claim; source [1] adds context. Keep [99].",
+        "source_analysis": [
+            {"source_index": 0, "stance": "SUPPORTS", "directness": "DIRECT"},
+            {"source_index": 1, "stance": "PARTIAL", "directness": "DIRECT"},
+        ],
+    }]))
+    verdict = fact_checker._verify_one(
+        {"claim": "x", "speaker": "X"}, "evidence",
+        [one_source(url="https://one.example"), one_source(url="https://two.example")],
+    )
+    assert verdict["explanation"] == (
+        "Source [1] supports the claim; source [2] adds context. Keep [99]."
+    )
+
+
+def test_retry_claim_reuses_saved_evidence_without_searching(monkeypatch):
+    monkeypatch.setattr(
+        fact_checker,
+        "_search",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("search reran")),
+    )
+    monkeypatch.setattr(
+        fact_checker,
+        "_verify_one",
+        lambda claim, *_args, **_kwargs: {
+            "claim": claim["claim"],
+            "verdict": "TRUE",
+            "supported": True,
+            "contradicted": False,
+            "confidence": 90,
+            "explanation": "Supported by the saved evidence.",
+            "sources": [],
+        },
+    )
+
+    result = fact_checker.retry_claim(
+        {"claim": "The event happened.", "query": "event happened", "speaker": "A"},
+        3,
+        evidence={"search_text": "saved evidence", "sources": [one_source()]},
+    )
+
+    assert result.status == "completed"
+    assert result[0]["claim_index"] == 3
+    assert result[0]["speaker"] == "A"
+
+
+def test_fact_check_exposes_private_claims_and_evidence_to_job_storage(monkeypatch):
+    claims_seen = []
+    evidence_seen = []
+    source = one_source(content="Saved evidence.")
+    monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: extraction_payload(1))
+    monkeypatch.setattr(fact_checker, "_search", lambda *_args, **_kwargs: ("Saved evidence.", [source]))
+    monkeypatch.setattr(
+        fact_checker, "_verify_one", lambda claim, *_args, **_kwargs: verdict_for(claim)
+    )
+
+    result = fact_checker.fact_check(
+        "A sufficiently long factual sentence.",
+        on_claims=claims_seen.append,
+        on_evidence=evidence_seen.append,
+    )
+
+    assert result.status == "completed"
+    assert claims_seen == [[{
+        "claim": "claim-0", "query": "query-0", "speaker": "speaker-0",
+    }]]
+    assert evidence_seen == [{
+        "claim_index": 0,
+        "search_text": "Saved evidence.",
+        "sources": [source],
+    }]
+
+
+def test_retry_claim_reports_insufficient_evidence_as_non_provider_failure(monkeypatch):
+    monkeypatch.setattr(fact_checker, "_search", lambda *_args, **_kwargs: ("", []))
+
+    result = fact_checker.retry_claim(
+        {"claim": "The event happened.", "query": "event happened"}, 1,
+    )
+
+    assert result.status == "no_evidence"
+    assert result.errors == [{
+        "stage": "search",
+        "code": "claim_no_evidence",
+        "message": "No sufficient evidence was found for this claim.",
+        "claim_index": 1,
     }]
 
 

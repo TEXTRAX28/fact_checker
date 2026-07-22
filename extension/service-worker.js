@@ -1,3 +1,5 @@
+import { claimSearchCandidates, samePageUrl, selectClaimText } from "./page-find.js";
+
 const ACTIVE_TAB_KEY = "fc:activeTabId";
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -15,12 +17,53 @@ chrome.action.onClicked.addListener((tab) => {
 // qualifies for a new activeTab grant on whatever tab is currently focused, the
 // same way clicking the toolbar action does. This is how re-reading the page
 // works without re-requesting broader "tabs"/host permissions.
-chrome.runtime.onMessage.addListener((message) => {
-  if (message?.type !== "REFRESH_PAGE_CAPTURE") return;
-  void chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
-    if (tab && Number.isInteger(tab.id)) void capturePage(tab);
-  });
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "REFRESH_PAGE_CAPTURE") {
+    void chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+      if (tab && Number.isInteger(tab.id)) void capturePage(tab);
+    });
+    return undefined;
+  }
+
+  if (message?.type === "FIND_CLAIM_ON_PAGE") {
+    void findClaimOnPage(message).then(sendResponse);
+    return true;
+  }
+
+  return undefined;
 });
+
+async function findClaimOnPage(message) {
+  const tabId = message?.tabId;
+  const candidates = claimSearchCandidates(message?.claim);
+  if (!Number.isInteger(tabId) || !message?.url || candidates.length === 0) {
+    return { found: false, message: "This claim cannot be searched on the page." };
+  }
+
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (!samePageUrl(tab.url, message.url)) {
+      return { found: false, message: "The checked page is no longer open in that tab." };
+    }
+
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [0] },
+      func: selectClaimText,
+      args: [candidates],
+    });
+    if (!result?.found) {
+      return { found: false, message: "The claim wording was not found on this page." };
+    }
+
+    await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+    return result;
+  } catch {
+    return {
+      found: false,
+      message: "The page could not be searched. Reopen it with the Fact Check toolbar icon.",
+    };
+  }
+}
 
 async function capturePage(tab) {
   const tabId = tab.id;

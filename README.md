@@ -228,8 +228,9 @@ assets, script syntax, API configuration location, and icon file dimensions.
   process restarts.
 - Cancellation is best-effort. A provider call already in progress may run
   until its configured timeout.
-- Provider timeouts exist, but there is not yet one overall wall-clock deadline
-  for an entire check.
+- Each check has a 300-second wall-clock deadline. Provider calls use the smaller
+  of their own timeout and the remaining job budget; completed verdicts are
+  preserved if the deadline produces a partial result.
 - Current Page mode sends extracted page text to the local backend. Relevant
   claim and evidence content is sent to the configured external providers.
 - The extension is not yet configured for a hosted public API or Chrome Web

@@ -15,7 +15,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from jobs import ActiveJobError, CapacityError, CreationRateLimitError, JobManager
+from jobs import (
+    ActiveJobError,
+    CapacityError,
+    ClaimRetryError,
+    CreationRateLimitError,
+    JobManager,
+)
 
 # main.py (the CLI) loads .env too; this call is needed here because api.py no
 # longer imports main.py (service.py is the shared boundary instead), so that
@@ -224,6 +230,31 @@ def create_app(manager_factory=_manager_from_env) -> FastAPI:
         job_id: str, jobs: JobManager = Depends(manager)
     ):
         snapshot = jobs.cancel(job_id)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="Check not found.")
+        return snapshot
+
+    @application.post(
+        "/v1/checks/{job_id}/claims/{claim_index}/retry",
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=[Depends(authorize)],
+    )
+    async def retry_claim(
+        job_id: str,
+        claim_index: int,
+        request: Request,
+        jobs: JobManager = Depends(manager),
+    ):
+        try:
+            snapshot = jobs.retry_claim(job_id, claim_index, client_id(request))
+        except (ActiveJobError, ClaimRetryError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except CapacityError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from None
+        except CreationRateLimitError as exc:
+            raise HTTPException(
+                status_code=429, detail=str(exc), headers={"Retry-After": "60"}
+            ) from None
         if snapshot is None:
             raise HTTPException(status_code=404, detail="Check not found.")
         return snapshot

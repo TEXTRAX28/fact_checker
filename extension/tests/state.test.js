@@ -7,9 +7,23 @@ import {
   isTerminalState,
   mergeEvent,
   normalizeSnapshot,
+  snapshotBelongsToJob,
+  snapshotIsStale,
   statusCopy,
   toMarkdownReport,
 } from "../state.js";
+
+test("snapshotBelongsToJob rejects a response from a replaced job", () => {
+  assert.equal(snapshotBelongsToJob({ id: "check-old" }, "check-new"), false);
+  assert.equal(snapshotBelongsToJob({ check_id: "check-new" }, "check-new"), true);
+  assert.equal(snapshotBelongsToJob({}, "check-new"), false);
+});
+
+test("snapshotIsStale rejects an older response from the same job", () => {
+  assert.equal(snapshotIsStale({ sequence: 8 }, { sequence: 9 }), true);
+  assert.equal(snapshotIsStale({ sequence: 9 }, { sequence: 9 }), false);
+  assert.equal(snapshotIsStale({ sequence: 10 }, { sequence: 9 }), false);
+});
 
 test("normalizeSnapshot renders a completed empty check distinctly", () => {
   const snapshot = normalizeSnapshot({
@@ -41,6 +55,7 @@ test("normalizeSnapshot accepts partial verdict and source aliases", () => {
     errors: [{ message: "One provider timed out." }],
   });
   assert.equal(snapshot.results[0].claim, "The event happened in 2025.");
+  assert.equal(snapshot.results[0].index, 1);
   assert.equal(snapshot.results[0].sources[0].title, "Primary source");
   assert.deepEqual(snapshot.errors, ["One provider timed out."]);
   assert.deepEqual(statusCopy(snapshot), ["Partially complete", "1 of 2 claims were checked."]);
@@ -218,6 +233,46 @@ test("compactSession preserves recovery fields without source input text", () =>
   assert.equal(compact.sequence, 9);
   assert.equal(compact.claimCount, 4);
   assert.equal("text" in compact, false);
+});
+
+test("normalizeSnapshot retains structured failed-claim retry state", () => {
+  const snapshot = normalizeSnapshot({
+    id: "check-retry",
+    status: "partial",
+    claim_count: 2,
+    results: [{ claim_index: 0, claim: "done", verdict: "TRUE" }],
+    claim_manifest: [
+      { claim_index: 0, claim: "done", speaker: "A" },
+      { claim_index: 1, claim: "failed claim", speaker: "A" },
+    ],
+    errors: [{
+      claim_index: 1,
+      stage: "verification",
+      code: "provider_timeout",
+      message: "A provider request timed out.",
+    }],
+    retrying_claim_index: 1,
+    retry_attempts: { 1: 1 },
+    claim_retry_limit: 2,
+  });
+
+  assert.deepEqual(snapshot.errors, []);
+  assert.deepEqual(snapshot.claimErrors, [{
+    claimIndex: 1,
+    stage: "verification",
+    code: "provider_timeout",
+    message: "A provider request timed out.",
+  }]);
+  assert.equal(snapshot.claimManifest[1].claim, "failed claim");
+  assert.equal(snapshot.retryingClaimIndex, 1);
+  assert.equal(snapshot.retryAttempts[1], 1);
+
+  const terminal = mergeEvent(snapshot, {
+    sequence: 5,
+    status: "completed",
+    outcome: { results: snapshot.results, errors: [], claim_count: 2 },
+  }, "terminal");
+  assert.equal(terminal.retryingClaimIndex, null);
 });
 
 test("buildExportData shapes a completed snapshot for export", () => {

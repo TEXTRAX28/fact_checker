@@ -545,6 +545,10 @@ section {
   border-left-color: var(--amber);
 }
 
+.result-card[data-verdict="FAILED"] {
+  border-left-color: var(--red);
+}
+
 .result-header {
   display: flex;
   align-items: center;
@@ -578,6 +582,11 @@ section {
   background: var(--amber-soft);
 }
 
+.verdict-label[data-verdict="FAILED"] {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
 .confidence {
   flex: 0 0 auto;
   color: var(--muted);
@@ -596,6 +605,51 @@ section {
   color: #4f5a64;
   font-size: 13px;
   overflow-wrap: anywhere;
+}
+
+.result-actions {
+  margin-top: 11px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.find-page-action {
+  flex: 0 0 auto;
+}
+
+.find-page-action:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.find-page-status {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.retry-claim-action {
+  flex: 0 0 auto;
+}
+
+.retry-status {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.accuracy-notice {
+  margin: 14px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .source-list {

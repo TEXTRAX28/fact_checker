@@ -12,7 +12,14 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from fact_checker import MIN_INPUT_NON_WHITESPACE, FactCheckResult, fact_check
+from fact_checker import (
+    MIN_INPUT_NON_WHITESPACE,
+    WHOLE_JOB_DEADLINE_SECONDS,
+    FactCheckResult,
+    WholeJobDeadlineExceeded,
+    fact_check,
+    retry_claim as retry_fact_claim,
+)
 
 JINA_TIMEOUT_SECONDS = 12.0
 MAX_ARTICLE_BYTES = 2 * 1024 * 1024
@@ -29,6 +36,8 @@ _PUBLIC_ERROR_MESSAGES = {
     "provider_protocol_error": "A provider returned malformed output.",
     "provider_rate_limited": "A provider rate limit was reached.",
     "provider_timeout": "A provider request timed out.",
+    "job_deadline_exceeded": "The fact-check exceeded its time limit.",
+    "claim_no_evidence": "No sufficient evidence was found for this claim.",
 }
 _PUBLIC_ERROR_STAGES = {"article_fetch", "extraction", "pipeline", "search", "verification"}
 
@@ -83,6 +92,17 @@ def _callback_wrapper(callback: Callable | None, label: str) -> Callable | None:
 
 def _cancelled(cancel_event) -> bool:
     return cancel_event is not None and cancel_event.is_set()
+
+
+def _resolve_deadline(deadline: float | None) -> float:
+    return deadline if deadline is not None else time.monotonic() + WHOLE_JOB_DEADLINE_SECONDS
+
+
+def _remaining_timeout(limit: float, deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise WholeJobDeadlineExceeded("The fact-check exceeded its time limit.")
+    return min(limit, remaining)
 
 
 def _non_whitespace_length(value: str) -> int:
@@ -215,7 +235,7 @@ def _normalize_public_url(url: str) -> str:
     return urlunsplit((scheme, netloc, path, parsed.query, ""))
 
 
-def _fetch_jina_article(url: str) -> str:
+def _fetch_jina_article(url: str, *, deadline: float | None = None) -> str:
     """Fetch a direct Jina response without following local HTTP redirects.
 
     Jina retrieves the original site remotely, so redirects followed by Jina while
@@ -227,6 +247,8 @@ def _fetch_jina_article(url: str) -> str:
         "X-Remove-Selector": "nav, footer, header, aside",
         "X-Retain-Images": "none",
     }
+    deadline = _resolve_deadline(deadline)
+    effective_timeout = _remaining_timeout(JINA_TIMEOUT_SECONDS, deadline)
     chunks = []
     size = 0
     started = time.monotonic()
@@ -234,7 +256,7 @@ def _fetch_jina_article(url: str) -> str:
         "GET",
         f"https://r.jina.ai/{url}",
         headers=headers,
-        timeout=httpx.Timeout(JINA_TIMEOUT_SECONDS),
+        timeout=httpx.Timeout(effective_timeout),
         follow_redirects=False,
     ) as response:
         if response.status_code != 200:
@@ -243,7 +265,8 @@ def _fetch_jina_article(url: str) -> str:
                 request=response.request,
                 response=response,
             )
-        if time.monotonic() - started > JINA_TIMEOUT_SECONDS:
+        if (time.monotonic() - started > effective_timeout
+                or time.monotonic() >= deadline):
             raise httpx.ReadTimeout("Jina response exceeded the article deadline.")
         content_length = response.headers.get("content-length")
         if content_length:
@@ -255,7 +278,8 @@ def _fetch_jina_article(url: str) -> str:
                 raise ArticleTooLargeError("Jina response exceeded the article size limit.")
 
         for chunk in response.iter_bytes():
-            if time.monotonic() - started > JINA_TIMEOUT_SECONDS:
+            if (time.monotonic() - started > effective_timeout
+                    or time.monotonic() >= deadline):
                 raise httpx.ReadTimeout("Jina response exceeded the article deadline.")
             size += len(chunk)
             if size > MAX_ARTICLE_BYTES:
@@ -307,12 +331,16 @@ def _outcome_from_pipeline(pipeline_result, *, metadata=None,
         "cancelled": "Fact-check was cancelled.",
         "failed": "Fact-check failed.",
     }
+    if any(error.get("code") == "job_deadline_exceeded" for error in errors):
+        message = "The fact-check exceeded its time limit."
+    else:
+        message = messages.get(status, "Fact-check finished.")
     return CheckOutcome(
         status=status,
         results=list(pipeline_result),
         claim_count=claim_count,
         errors=errors,
-        message=messages.get(status, "Fact-check finished."),
+        message=message,
         metadata=metadata,
         normalized_url=normalized_url,
     )
@@ -320,7 +348,8 @@ def _outcome_from_pipeline(pipeline_result, *, metadata=None,
 
 def _run_pipeline(text: str, *, metadata=None, normalized_url=None,
                   on_progress=None, on_result=None, cancel_event=None,
-                  verbose: bool = False) -> CheckOutcome:
+                  on_claims=None, on_evidence=None,
+                  verbose: bool = False, deadline: float | None = None) -> CheckOutcome:
     if _cancelled(cancel_event):
         return CheckOutcome(status="cancelled", message="Fact-check was cancelled.",
                             metadata=metadata, normalized_url=normalized_url)
@@ -329,8 +358,11 @@ def _run_pipeline(text: str, *, metadata=None, normalized_url=None,
             text,
             on_progress=_callback_wrapper(on_progress, "Progress"),
             on_result=_callback_wrapper(on_result, "Result"),
+            on_claims=_callback_wrapper(on_claims, "Claims"),
+            on_evidence=_callback_wrapper(on_evidence, "Evidence"),
             cancel_event=cancel_event,
             verbose=verbose,
+            deadline=deadline,
         )
     except Exception as exc:
         logger.exception("Fact-check pipeline failed")
@@ -357,7 +389,9 @@ def _run_pipeline(text: str, *, metadata=None, normalized_url=None,
 
 def check_text(text: str, *, metadata: dict[str, Any] | None = None,
                on_progress=None, on_result=None, cancel_event=None,
-               verbose: bool = False) -> CheckOutcome:
+               on_claims=None, on_evidence=None,
+               verbose: bool = False, deadline: float | None = None) -> CheckOutcome:
+    deadline = _resolve_deadline(deadline)
     progress = _callback_wrapper(on_progress, "Progress")
     _safe_callback(progress, {"stage": "validating", "state": "started"}, "Progress")
     if _cancelled(cancel_event):
@@ -373,13 +407,18 @@ def check_text(text: str, *, metadata: dict[str, Any] | None = None,
         metadata=metadata,
         on_progress=progress,
         on_result=on_result,
+        on_claims=on_claims,
+        on_evidence=on_evidence,
         cancel_event=cancel_event,
         verbose=verbose,
+        deadline=deadline,
     )
 
 
 def check_url(url: str, *, on_progress=None, on_result=None, cancel_event=None,
-              verbose: bool = False) -> CheckOutcome:
+              on_claims=None, on_evidence=None,
+              verbose: bool = False, deadline: float | None = None) -> CheckOutcome:
+    deadline = _resolve_deadline(deadline)
     progress = _callback_wrapper(on_progress, "Progress")
     _safe_callback(progress, {"stage": "validating_url", "state": "started"}, "Progress")
     if _cancelled(cancel_event):
@@ -399,7 +438,14 @@ def check_url(url: str, *, on_progress=None, on_result=None, cancel_event=None,
                             normalized_url=normalized_url)
     _safe_callback(progress, {"stage": "fetching_article", "state": "started"}, "Progress")
     try:
-        raw = _fetch_jina_article(normalized_url)
+        raw = _fetch_jina_article(normalized_url, deadline=deadline)
+    except WholeJobDeadlineExceeded:
+        return CheckOutcome(
+            status="timeout",
+            errors=[_error("pipeline", "job_deadline_exceeded")],
+            message="The fact-check exceeded its time limit.",
+            normalized_url=normalized_url,
+        )
     except httpx.TimeoutException:
         logger.exception("Jina Reader timed out")
         return CheckOutcome(
@@ -439,6 +485,24 @@ def check_url(url: str, *, on_progress=None, on_result=None, cancel_event=None,
         normalized_url=normalized_url,
         on_progress=progress,
         on_result=on_result,
+        on_claims=on_claims,
+        on_evidence=on_evidence,
         cancel_event=cancel_event,
         verbose=verbose,
+        deadline=deadline,
     )
+
+
+def retry_claim(claim: dict, claim_index: int, *, evidence: dict | None = None,
+                on_progress=None, on_evidence=None, cancel_event=None,
+                deadline: float | None = None) -> CheckOutcome:
+    pipeline_result = retry_fact_claim(
+        claim,
+        claim_index,
+        evidence=evidence,
+        on_progress=_callback_wrapper(on_progress, "Progress"),
+        on_evidence=_callback_wrapper(on_evidence, "Evidence"),
+        cancel_event=cancel_event,
+        deadline=deadline,
+    )
+    return _outcome_from_pipeline(pipeline_result)

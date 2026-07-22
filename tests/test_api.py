@@ -220,6 +220,90 @@ def test_404s_and_invalid_last_event_id(client):
     assert "private" not in response.text
 
 
+def test_failed_claim_can_be_retried_without_rerunning_extraction(monkeypatch):
+    class PartialOutcome:
+        def to_dict(self):
+            return {
+                "status": "partial",
+                "results": [{"claim_index": 0, "claim": "claim zero", "verdict": "TRUE"}],
+                "claim_count": 2,
+                "completed_count": 1,
+                "errors": [{
+                    "stage": "verification",
+                    "code": "provider_timeout",
+                    "message": "A provider request timed out.",
+                    "claim_index": 1,
+                }],
+                "message": "Fact-check completed with partial results.",
+                "normalized_url": None,
+                "metadata": {"source": "text"},
+            }
+
+    captured = {}
+    retry_started = threading.Event()
+    release_retry = threading.Event()
+
+    def initial_check(*_args, **kwargs):
+        kwargs["on_claims"]([
+            {"claim": "claim zero", "query": "query zero", "speaker": "A"},
+            {"claim": "claim one", "query": "private retry query", "speaker": "A"},
+        ])
+        kwargs["on_evidence"]({
+            "claim_index": 1,
+            "search_text": "saved evidence",
+            "sources": [{"url": "https://example.com", "content": "saved evidence"}],
+        })
+        return PartialOutcome()
+
+    def retry_claim(claim, claim_index, **kwargs):
+        captured.update({"claim": claim, "claim_index": claim_index, "evidence": kwargs["evidence"]})
+        retry_started.set()
+        if not release_retry.wait(timeout=2):
+            raise TimeoutError("test did not release retry worker")
+        return Outcome(results=[{
+            "claim_index": claim_index,
+            "claim": claim["claim"],
+            "verdict": "TRUE",
+        }])
+
+    monkeypatch.setattr(jobs.service, "check_text", initial_check)
+    monkeypatch.setattr(jobs.service, "retry_claim", retry_claim)
+    manager = jobs.JobManager(max_workers=1, rate_limit=20)
+    with TestClient(api.create_app(lambda: manager)) as test_client:
+        created = test_client.post(
+            "/v1/checks", json={"type": "text", "text": "factual input"}
+        ).json()
+        partial = wait_for_status(test_client, created["id"], "partial")
+        assert partial["claim_manifest"][1]["claim"] == "claim one"
+        assert "private retry query" not in str(partial)
+
+        started_at = time.monotonic()
+        response = test_client.post(f"/v1/checks/{created['id']}/claims/1/retry")
+        elapsed = time.monotonic() - started_at
+        try:
+            assert response.status_code == 202
+            assert elapsed < 0.5
+            assert retry_started.wait(timeout=1)
+            assert response.json()["status"] == "running"
+            assert response.json()["progress"]["stage"] == "verifying"
+        finally:
+            release_retry.set()
+        completed = wait_for_status(test_client, created["id"], "completed")
+
+    assert [result["claim_index"] for result in completed["results"]] == [0, 1]
+    assert completed["errors"] == []
+    assert captured["claim_index"] == 1
+    assert captured["claim"]["query"] == "private retry query"
+    assert captured["evidence"]["search_text"] == "saved evidence"
+
+
+def test_retry_rejects_claim_that_already_has_a_result(client):
+    created = client.post("/v1/checks", json={"type": "text", "text": "body"}).json()
+    wait_for_status(client, created["id"], "completed")
+    response = client.post(f"/v1/checks/{created['id']}/claims/0/retry")
+    assert response.status_code == 409
+
+
 def test_development_cors_and_private_network_preflight(monkeypatch):
     monkeypatch.setenv("APP_ENV", "development")
     manager = jobs.JobManager(rate_limit=20)

@@ -114,7 +114,7 @@ def test_url_fragment_is_removed_before_jina_fetch(monkeypatch):
     monkeypatch.setattr(
         service,
         "_fetch_jina_article",
-        lambda url: fetched.append(url) or article,
+        lambda url, **_kwargs: fetched.append(url) or article,
     )
     monkeypatch.setattr(
         service,
@@ -194,12 +194,31 @@ def test_jina_timeout_has_distinct_status(monkeypatch):
     monkeypatch.setattr(
         service,
         "_fetch_jina_article",
-        lambda _url: (_ for _ in ()).throw(httpx.ReadTimeout("slow")),
+        lambda _url, **_kwargs: (_ for _ in ()).throw(httpx.ReadTimeout("slow")),
     )
 
     outcome = service.check_url("https://example.com/story")
 
     assert outcome.status == "timeout"
+
+
+def test_whole_job_deadline_includes_article_fetch(monkeypatch):
+    monkeypatch.setattr(service.socket, "getaddrinfo", public_dns)
+    monkeypatch.setattr(
+        service,
+        "_fetch_jina_article",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            service.WholeJobDeadlineExceeded("expired")
+        ),
+    )
+
+    outcome = service.check_url(
+        "https://example.com/story", deadline=service.time.monotonic() - 1
+    )
+
+    assert outcome.status == "timeout"
+    assert outcome.errors[0]["code"] == "job_deadline_exceeded"
+    assert outcome.message == "The fact-check exceeded its time limit."
 
 
 def test_jina_response_size_is_bounded(monkeypatch):

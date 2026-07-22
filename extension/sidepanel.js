@@ -6,6 +6,7 @@ import {
   createCheck,
   getCheckSnapshot,
   getHealth,
+  retryCheckClaim,
 } from "./api.js";
 import { CLIENT_LIMITS } from "./config.js";
 import { createIcon, hydrateIcons } from "./icons.js";
@@ -16,6 +17,8 @@ import {
   isTerminalState,
   mergeEvent,
   normalizeSnapshot,
+  snapshotBelongsToJob,
+  snapshotIsStale,
   stageIndex,
   statusCopy,
   toMarkdownReport,
@@ -69,7 +72,7 @@ const app = {
   eventSource: null,
   pollTimer: null,
   snapshotTimer: null,
-  refreshInFlight: false,
+  refreshInFlight: null,
   cancelPending: false,
   inputMessage: "",
   lastAnnouncement: "",
@@ -120,6 +123,20 @@ function bindEvents() {
     const button = event.target.closest("[data-mode]");
     if (!button || isRunning()) return;
     setMode(button.dataset.mode);
+  });
+  elements.modeControl.addEventListener("keydown", (event) => {
+    if (isRunning() || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    const buttons = [...elements.modeControl.querySelectorAll("[data-mode]")];
+    const current = buttons.indexOf(event.target.closest("[data-mode]"));
+    if (current < 0) return;
+    let next = current;
+    if (event.key === "ArrowLeft") next = (current - 1 + buttons.length) % buttons.length;
+    if (event.key === "ArrowRight") next = (current + 1) % buttons.length;
+    if (event.key === "Home") next = 0;
+    if (event.key === "End") next = buttons.length - 1;
+    event.preventDefault();
+    buttons[next].focus();
+    setMode(buttons[next].dataset.mode);
   });
 
   elements.primary.addEventListener("click", () => {
@@ -228,8 +245,11 @@ function setMode(mode) {
 function renderInput() {
   elements.inputPanel.replaceChildren();
   for (const button of elements.modeControl.querySelectorAll("[data-mode]")) {
-    button.setAttribute("aria-selected", String(button.dataset.mode === app.mode));
+    const selected = button.dataset.mode === app.mode;
+    button.setAttribute("aria-selected", String(selected));
+    button.tabIndex = selected ? 0 : -1;
   }
+  elements.inputPanel.setAttribute("aria-labelledby", `mode-${app.mode}`);
 
   if (app.mode === "page") renderPageInput();
   if (app.mode === "url") renderUrlInput();
@@ -441,16 +461,26 @@ function renderResults() {
     return;
   }
 
-  const hasZeroIndex = results.some((result) => result.index === 0);
-  const resultBySlot = new Map(results.map((result, fallbackIndex) => {
-    const slot = hasZeroIndex ? result.index : result.index - 1;
-    return [slot >= 0 ? slot : fallbackIndex, result];
-  }));
+  // claim_index is zero-based throughout fact_checker.py and jobs.py. Inferring
+  // one-based indices from a partial result set misplaces claim 1 when claim 0
+  // is the one that failed.
+  const resultBySlot = new Map(results.map((result, fallbackIndex) => [
+    Number.isInteger(result.index) ? result.index : fallbackIndex,
+    result,
+  ]));
+  const claimBySlot = new Map(
+    (app.snapshot.claimManifest || []).map((claim) => [claim.index, claim]),
+  );
+  const errorBySlot = new Map(
+    (app.snapshot.claimErrors || []).map((error) => [error.claimIndex, error]),
+  );
 
   for (let index = 0; index < slotCount; index += 1) {
     elements.resultsList.append(resultBySlot.has(index)
       ? renderResult(resultBySlot.get(index))
-      : renderPlaceholder(index));
+      : claimBySlot.has(index) && (terminal || errorBySlot.has(index))
+        ? renderFailedClaim(index, claimBySlot.get(index), errorBySlot.get(index))
+        : renderPlaceholder(index));
   }
 }
 
@@ -475,6 +505,17 @@ function renderResult(result) {
     node("h3", "claim-text", result.claim),
     node("p", "explanation", result.explanation),
   );
+
+  if (findablePageContext()) {
+    const status = node("span", "find-page-status");
+    const button = actionButton("Find on page", "search", () => {
+      void findClaimOnPage(result.claim, button, status);
+    });
+    button.classList.add("find-page-action");
+    const actions = node("div", "result-actions");
+    actions.append(button, status);
+    card.append(actions);
+  }
 
   const sources = result.sources.filter((source) => safeSourceUrl(source.url));
   if (sources.length) {
@@ -505,6 +546,40 @@ function renderPlaceholder(index) {
     node("div", "skeleton-line"),
   );
   return placeholder;
+}
+
+function renderFailedClaim(index, claim, error) {
+  const card = node("article", "result-card failed-claim");
+  card.dataset.verdict = "FAILED";
+  const header = node("div", "result-header");
+  const label = node("span", "verdict-label", "CHECK FAILED");
+  label.dataset.verdict = "FAILED";
+  const attemptCount = Number(app.snapshot.retryAttempts?.[index] || 0);
+  const retryLimit = app.snapshot.claimRetryLimit || 2;
+  header.append(label, node("span", "confidence", `Claim ${index + 1}`));
+  card.append(
+    header,
+    node("h3", "claim-text", claim.claim),
+    node("p", "explanation", error?.message || "No verdict was produced for this claim."),
+  );
+
+  if (error && isRetryableClaimError(error.code) && attemptCount < retryLimit) {
+    const status = node("span", "retry-status");
+    const retrying = app.snapshot.retryingClaimIndex === index;
+    const button = actionButton(
+      retrying ? "Retrying" : "Retry claim",
+      "rotate-cw",
+      () => void retryFailedClaim(index, status),
+    );
+    button.classList.add("retry-claim-action");
+    button.disabled = isRunning();
+    const actions = node("div", "result-actions");
+    actions.append(button, status);
+    card.append(actions);
+  } else if (attemptCount >= retryLimit) {
+    card.append(node("p", "retry-status", "Retry limit reached."));
+  }
+  return card;
 }
 
 function renderEmptyResult() {
@@ -578,6 +653,26 @@ async function requestCancellation() {
   }
 }
 
+async function retryFailedClaim(claimIndex, status) {
+  if (!app.job || isRunning()) return;
+  status.textContent = "Starting retry...";
+  try {
+    const raw = await retryCheckClaim(app.job.checkId, claimIndex);
+    if (!snapshotBelongsToJob(raw, app.job.checkId)) {
+      throw new ApiError("The backend returned an unexpected retry response.");
+    }
+    if (!snapshotIsStale(raw, app.snapshot)) {
+      app.snapshot = normalizeSnapshot(raw, app.snapshot);
+    }
+    await persistActiveJob();
+    render();
+    connectTransport();
+  } catch (error) {
+    status.textContent = error?.message || "The claim could not be retried.";
+    elements.liveStatus.textContent = status.textContent;
+  }
+}
+
 function connectTransport() {
   if (!app.job || isTerminalState(app.snapshot.state)) return;
   stopTransport();
@@ -620,16 +715,24 @@ function handleServerEvent(event) {
 }
 
 async function refreshSnapshot() {
-  if (!app.job || app.refreshInFlight) return;
-  app.refreshInFlight = true;
+  if (!app.job || app.refreshInFlight === app.job.checkId) return;
+  const requestedJob = {
+    checkId: app.job.checkId,
+    snapshotPath: app.job.snapshotPath,
+  };
+  app.refreshInFlight = requestedJob.checkId;
   try {
-    const raw = await getCheckSnapshot(app.job.checkId, app.job.snapshotPath);
+    const raw = await getCheckSnapshot(requestedJob.checkId, requestedJob.snapshotPath);
+    if (app.job?.checkId !== requestedJob.checkId
+        || !snapshotBelongsToJob(raw, requestedJob.checkId)
+        || snapshotIsStale(raw, app.snapshot)) return;
     app.snapshot = normalizeSnapshot(raw, app.snapshot);
     setBackend("online");
     await persistActiveJob();
     render();
     if (isTerminalState(app.snapshot.state)) stopTransport();
   } catch (error) {
+    if (app.job?.checkId !== requestedJob.checkId) return;
     if (isJobNotFound(error)) {
       // The backend has no record of this job - almost always api.py having
       // restarted since this job was created. Polling it forever would never
@@ -641,7 +744,7 @@ async function refreshSnapshot() {
       schedulePolling(2_500);
     }
   } finally {
-    app.refreshInFlight = false;
+    if (app.refreshInFlight === requestedJob.checkId) app.refreshInFlight = null;
   }
 }
 
@@ -688,7 +791,9 @@ function hasUsableInput() {
 }
 
 function submissionContext() {
-  if (app.mode === "page") return { title: app.page?.title, url: app.page?.url };
+  if (app.mode === "page") {
+    return { title: app.page?.title, url: app.page?.url, tabId: app.page?.tabId ?? app.activeTabId };
+  }
   if (app.mode === "url") return { url: app.drafts.url.trim() };
   return { title: "Pasted text" };
 }
@@ -767,12 +872,60 @@ function safeSourceUrl(value) {
   }
 }
 
+function isRetryableClaimError(code) {
+  return [
+    "provider_error",
+    "provider_protocol_error",
+    "provider_rate_limited",
+    "provider_timeout",
+  ].includes(code);
+}
+
 function actionButton(label, iconName, onClick) {
   const button = node("button", "secondary-action");
   button.type = "button";
   button.append(createIcon(iconName, 16), document.createTextNode(label));
   button.addEventListener("click", onClick);
   return button;
+}
+
+function findablePageContext() {
+  if (!isTerminalState(app.snapshot.state)
+      || app.job?.mode !== "page"
+      || !app.job.context?.url) return null;
+  const tabId = app.job.context.tabId ?? app.activeTabId;
+  return Number.isInteger(tabId) ? { tabId, url: app.job.context.url } : null;
+}
+
+async function findClaimOnPage(claim, button, status) {
+  const context = findablePageContext();
+  if (!context) return;
+
+  button.disabled = true;
+  button.replaceChildren(createIcon("search", 16), document.createTextNode("Finding"));
+  status.textContent = "";
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "FIND_CLAIM_ON_PAGE",
+      tabId: context.tabId,
+      url: context.url,
+      claim,
+    });
+    const found = response?.found === true;
+    status.textContent = found ? "Found on page." : response?.message || "Text not found on this page.";
+    elements.liveStatus.textContent = status.textContent;
+    button.replaceChildren(
+      createIcon("search", 16),
+      document.createTextNode(found ? "Find again" : "Try again"),
+    );
+  } catch {
+    status.textContent = "The page could not be searched. Reopen it with the toolbar icon.";
+    elements.liveStatus.textContent = status.textContent;
+    button.replaceChildren(createIcon("search", 16), document.createTextNode("Try again"));
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function node(tag, className = "", text = "") {

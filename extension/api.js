@@ -159,3 +159,10 @@ export function cancelCheck(checkId) {
     timeoutMs: 10_000,
   });
 }
+
+export function retryCheckClaim(checkId, claimIndex) {
+  return requestJson(
+    `/v1/checks/${encodeURIComponent(checkId)}/claims/${encodeURIComponent(claimIndex)}/retry`,
+    { method: "POST", expectedStatus: 202, timeoutMs: 15_000 },
+  );
+}

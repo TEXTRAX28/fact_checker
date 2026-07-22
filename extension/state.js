@@ -73,6 +73,27 @@ function normalizeSource(source, index) {
   };
 }
 
+function normalizeClaimError(error) {
+  if (!error || typeof error !== "object") return null;
+  const claimIndex = Number(error.claim_index);
+  if (!Number.isInteger(claimIndex) || claimIndex < 0) return null;
+  return {
+    claimIndex,
+    stage: String(error.stage || "pipeline"),
+    code: String(error.code || "provider_error"),
+    message: String(error.message || error.detail || "A provider request failed."),
+  };
+}
+
+function normalizeClaimManifest(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((claim, fallbackIndex) => ({
+    index: Math.max(0, asNumber(claim?.claim_index, fallbackIndex)),
+    claim: String(firstDefined(claim?.claim, claim?.claim_text, "Claim unavailable")),
+    speaker: String(firstDefined(claim?.speaker, "UNKNOWN")),
+  }));
+}
+
 export function normalizeResult(result, fallbackIndex = 0) {
   const claimObject = result?.claim && typeof result.claim === "object" ? result.claim : null;
   const rawIndex = firstDefined(result?.claim_index, result?.index, result?.position, claimObject?.index);
@@ -127,10 +148,48 @@ export function normalizeSnapshot(raw = {}, previous = {}) {
     state = "complete_no_claims";
   }
 
-  const rawErrors = firstDefined(raw.errors, raw.warnings, previous.errors, []);
-  const errors = (Array.isArray(rawErrors) ? rawErrors : [rawErrors])
-    .filter(Boolean)
-    .map((error) => typeof error === "string" ? error : String(error.message || error.detail || error.code || "Unknown error"));
+  const fallbackErrors = [
+    ...(previous.errors || []),
+    ...(previous.claimErrors || []).map((error) => ({
+      claim_index: error.claimIndex,
+      stage: error.stage,
+      code: error.code,
+      message: error.message,
+    })),
+  ];
+  const primaryErrors = firstDefined(raw.errors, raw.warnings);
+  const rawErrors = primaryErrors === undefined
+    ? fallbackErrors
+    : [
+        ...(Array.isArray(primaryErrors) ? primaryErrors : [primaryErrors]),
+        ...(raw.claimErrors || []).map((error) => ({
+          claim_index: error.claimIndex,
+          stage: error.stage,
+          code: error.code,
+          message: error.message,
+        })),
+      ];
+  const errorValues = (Array.isArray(rawErrors) ? rawErrors : [rawErrors]).filter(Boolean);
+  const claimErrors = errorValues.map(normalizeClaimError).filter(Boolean);
+  const errors = errorValues
+    .filter((error) => normalizeClaimError(error) === null)
+    .map((error) => typeof error === "string"
+      ? error
+      : String(error.message || error.detail || error.code || "Unknown error"));
+  const claimManifest = normalizeClaimManifest(firstDefined(
+    raw.claim_manifest,
+    raw.claimManifest,
+    previous.claimManifest,
+    [],
+  ));
+  const rawRetryingIndex = raw.retrying_claim_index !== undefined
+    ? raw.retrying_claim_index
+    : firstDefined(raw.retryingClaimIndex, previous.retryingClaimIndex, null);
+  const retryingClaimIndex = rawRetryingIndex !== null
+    && rawRetryingIndex !== ""
+    && Number.isInteger(Number(rawRetryingIndex))
+    ? Number(rawRetryingIndex)
+    : null;
 
   return {
     checkId: String(firstDefined(raw.check_id, raw.checkId, previous.checkId, "")),
@@ -149,10 +208,31 @@ export function normalizeSnapshot(raw = {}, previous = {}) {
     ))),
     results,
     errors,
+    claimErrors,
+    claimManifest,
+    retryingClaimIndex,
+    retryAttempts: { ...(previous.retryAttempts || {}), ...(raw.retry_attempts || {}) },
+    claimRetryLimit: Math.max(1, asNumber(firstDefined(
+      raw.claim_retry_limit, raw.claimRetryLimit, previous.claimRetryLimit, 2,
+    ), 2)),
     cached: Boolean(firstDefined(raw.cached, raw.cache_hit, previous.cached, false)),
     startedAt: firstDefined(raw.started_at, raw.startedAt, previous.startedAt, null),
     completedAt: firstDefined(raw.completed_at, raw.completedAt, previous.completedAt, null),
   };
+}
+
+export function snapshotBelongsToJob(raw, checkId) {
+  if (!raw || typeof raw !== "object" || !checkId) return false;
+  const responseId = firstDefined(raw.id, raw.check_id, raw.checkId);
+  return responseId !== undefined && responseId !== null
+    && String(responseId) === String(checkId);
+}
+
+export function snapshotIsStale(raw, current = {}) {
+  if (!raw || typeof raw !== "object") return false;
+  const rawSequence = firstDefined(raw.sequence, raw.event_sequence);
+  if (rawSequence === undefined || rawSequence === null) return false;
+  return asNumber(rawSequence, 0) < asNumber(current.sequence, 0);
 }
 
 // The backend's SSE stream (jobs.py::JobManager._append_event) only ever names an
@@ -203,6 +283,7 @@ export function mergeEvent(snapshot, data = {}, eventType = "") {
       results: outcome.results,
       errors: outcome.errors,
       claim_count: outcome.claim_count,
+      retrying_claim_index: null,
     }, current);
   }
 
@@ -262,6 +343,11 @@ export function compactSession(snapshot, job) {
     completedCount: snapshot?.completedCount || 0,
     results: snapshot?.results || [],
     errors: snapshot?.errors || [],
+    claimErrors: snapshot?.claimErrors || [],
+    claimManifest: snapshot?.claimManifest || [],
+    retryingClaimIndex: snapshot?.retryingClaimIndex ?? null,
+    retryAttempts: snapshot?.retryAttempts || {},
+    claimRetryLimit: snapshot?.claimRetryLimit || 2,
     cached: Boolean(snapshot?.cached),
   };
 }
@@ -269,7 +355,7 @@ export function compactSession(snapshot, job) {
 // Pure data-shaping for the Export buttons, kept here (not in sidepanel.js) so it's
 // testable without a DOM/chrome.* shim, matching how the rest of this file works.
 export function buildExportData(snapshot, source = {}) {
-  const results = snapshot?.results || [];
+  const results = [...(snapshot?.results || [])].sort((left, right) => left.index - right.index);
   return {
     exportedAt: new Date().toISOString(),
     source: {

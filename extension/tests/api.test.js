@@ -6,6 +6,7 @@ import {
   apiUrl,
   buildCheckPayload,
   normalizeHttpUrl,
+  retryCheckClaim,
 } from "../api.js";
 
 test("apiUrl builds same-origin API URLs", () => {
@@ -55,4 +56,26 @@ test("buildCheckPayload validates URL and text modes", () => {
     text: "This is a factual claim to verify.",
   });
   assert.throws(() => buildCheckPayload({ mode: "text", text: "Too short" }), /at least 20/);
+});
+
+test("retryCheckClaim starts only the selected claim retry", async () => {
+  const originalFetch = globalThis.fetch;
+  let captured;
+  globalThis.fetch = async (url, options) => {
+    captured = { url, options };
+    return new Response(JSON.stringify({ id: "check-1", status: "running" }), {
+      status: 202,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const response = await retryCheckClaim("check-1", 3);
+    assert.equal(response.status, "running");
+    assert.equal(captured.url, "http://127.0.0.1:8000/v1/checks/check-1/claims/3/retry");
+    assert.equal(captured.options.method, "POST");
+    assert.equal(captured.options.body, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

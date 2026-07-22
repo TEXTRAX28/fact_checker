@@ -17,6 +17,7 @@ const requiredFiles = [
   "sidepanel.html",
   "sidepanel.css",
   "sidepanel.js",
+  "page-find.js",
   "vendor/readability/Readability.js",
   "vendor/readability/LICENSE",
   "vendor/lucide/LICENSE",
@@ -29,6 +30,22 @@ for (const file of requiredFiles) assert.ok(statSync(join(root, file)).isFile(),
 const html = readFileSync(join(root, "sidepanel.html"), "utf8");
 assert.doesNotMatch(html, /<script[^>]+src=["']https?:/i, "Remote scripts are forbidden");
 assert.doesNotMatch(html, /microphone|speech-to-text|live-stream|audio|video/i, "Forbidden feature copy found");
+assert.equal((html.match(/role="tab"/g) || []).length, 3, "All three modes must be tabs");
+assert.equal(
+  (html.match(/aria-controls="input-panel"/g) || []).length,
+  3,
+  "Every mode tab must identify its panel",
+);
+assert.match(
+  html,
+  /id="input-panel"[^>]+role="tabpanel"/,
+  "The source input must expose tabpanel semantics",
+);
+assert.match(
+  html,
+  /AI can make mistakes\. Verify important claims against the cited sources\./,
+  "The results view must include an accuracy notice",
+);
 
 const scripts = walk(root).filter((file) => /\.(?:js|mjs)$/.test(file));
 for (const script of scripts) execFileSync(process.execPath, ["--check", script], { stdio: "pipe" });
