@@ -25,6 +25,7 @@ MAX_EVIDENCE_PER_SOURCE_CHARS = 4_000
 MAX_EVIDENCE_TOTAL_CHARS = 10_000
 VERIFY_BACKLOG_MULTIPLIER = 2
 RAW_RESPONSE_LOG_MAX_CHARS = 8_000
+DEEPINFRA_REASONING_EFFORT = "none"
 
 _LANGUAGE_MARKERS = {
     "English": frozenset({
@@ -302,6 +303,88 @@ Remove any claim where confidence would be below 60.
 YOUR ENTIRE RESPONSE MUST BE A VALID JSON ARRAY STARTING WITH [ AND ENDING WITH ]. NOTHING ELSE."""
 
 
+EXTRACT_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "extracted_claims",
+        "strict": True,
+        "schema": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "claim": {"type": "string"},
+                    "query": {"type": "string"},
+                    "speaker": {"type": "string"},
+                },
+                "required": ["claim", "query", "speaker"],
+                "additionalProperties": False,
+            },
+        },
+    },
+}
+
+VERIFY_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "claim_verification",
+        "strict": True,
+        "schema": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "speaker": {"type": "string"},
+                    "claim": {"type": "string"},
+                    "supported": {"type": "boolean"},
+                    "contradicted": {"type": "boolean"},
+                    "verdict": {
+                        "type": "string",
+                        "enum": ["TRUE", "FALSE", "UNVERIFIABLE"],
+                    },
+                    "confidence": {"type": "integer", "minimum": 60, "maximum": 100},
+                    "explanation": {"type": "string"},
+                    "source_analysis": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "source_index": {"type": "integer", "minimum": 0},
+                                "stance": {
+                                    "type": "string",
+                                    "enum": [
+                                        "SUPPORTS", "CONTRADICTS", "PARTIAL",
+                                        "IRRELEVANT", "INSUFFICIENT",
+                                    ],
+                                },
+                                "directness": {
+                                    "type": "string",
+                                    "enum": ["DIRECT", "INDIRECT"],
+                                },
+                                "reason": {"type": "string"},
+                                "evidence_excerpt": {
+                                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                                },
+                            },
+                            "required": [
+                                "source_index", "stance", "directness", "reason",
+                                "evidence_excerpt",
+                            ],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": [
+                    "speaker", "claim", "supported", "contradicted", "verdict",
+                    "confidence", "explanation", "source_analysis",
+                ],
+                "additionalProperties": False,
+            },
+        },
+    },
+}
+
+
 # DeepInfra client (OpenAI-compatible)
 def _print_raw_response(*, run_id: str, claim_label: str, provider: str, operation: str,
                         attempt: int, elapsed: float, body, **extra_fields) -> None:
@@ -369,20 +452,25 @@ def _read_chat_stream(stream, deadline: float | None) -> str:
     return "".join(parts)
 
 
-def _chat(system: str, user: str, max_tokens: int, *, deadline: float | None = None) -> str:
+def _chat(system: str, user: str, max_tokens: int, *, deadline: float | None = None,
+          response_format: dict | None = None) -> str:
     for attempt in range(PROVIDER_MAX_RETRIES + 1):
         try:
-            stream = _deepinfra_().chat.completions.create(
-                model=MODEL,
-                max_tokens=max_tokens,
-                messages=[
+            request = {
+                "model": MODEL,
+                "max_tokens": max_tokens,
+                "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                temperature=0,
-                stream=True,
-                timeout=_bounded_timeout(DEEPINFRA_TIMEOUT_SECONDS, deadline),
-            )
+                "temperature": 0,
+                "extra_body": {"reasoning_effort": DEEPINFRA_REASONING_EFFORT},
+                "stream": True,
+                "timeout": _bounded_timeout(DEEPINFRA_TIMEOUT_SECONDS, deadline),
+            }
+            if response_format is not None:
+                request["response_format"] = response_format
+            stream = _deepinfra_().chat.completions.create(**request)
             with stream:
                 return _read_chat_stream(stream, deadline)
         except Exception as exc:
@@ -793,7 +881,13 @@ def _verify_one(claim: dict, search_text: str, sources: list[dict], verbose: boo
                f"SEARCH RESULTS:\n{search_text}\n\n"
                f"{language_instruction}")
     start = time.perf_counter()
-    raw_reply = _chat(VERIFY_PROMPT, context, max_tokens=1000, deadline=deadline)
+    raw_reply = _chat(
+        VERIFY_PROMPT,
+        context,
+        max_tokens=1000,
+        deadline=deadline,
+        response_format=VERIFY_RESPONSE_FORMAT,
+    )
     if verbose:
         # One print() call, not several: this claim's verify runs in its own worker thread
         # alongside every other claim's, so bundling done-time + raw text into a single write
@@ -971,7 +1065,13 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
     try:
         start = time.perf_counter()
         if verbose:
-            raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=4000, deadline=deadline)
+            raw = _chat(
+                EXTRACT_PROMPT,
+                transcript,
+                max_tokens=4000,
+                deadline=deadline,
+                response_format=EXTRACT_RESPONSE_FORMAT,
+            )
             _print_raw_response(
                 run_id=run_id, claim_label="-", provider="deepinfra",
                 operation="claim_extraction", attempt=1,
@@ -979,7 +1079,13 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
             )
         else:
             with _loading("Extracting claims (DeepSeek V4 Flash via DeepInfra)"):
-                raw = _chat(EXTRACT_PROMPT, transcript, max_tokens=4000, deadline=deadline)
+                raw = _chat(
+                    EXTRACT_PROMPT,
+                    transcript,
+                    max_tokens=4000,
+                    deadline=deadline,
+                    response_format=EXTRACT_RESPONSE_FORMAT,
+                )
     except Exception as exc:
         print(f"[ERROR] Extraction: {type(exc).__name__}: {exc}")
         errors.append(_public_provider_error("extraction", exc))

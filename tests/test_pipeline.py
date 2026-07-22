@@ -540,9 +540,14 @@ def test_deepinfra_chat_has_an_explicit_request_timeout(monkeypatch):
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     monkeypatch.setattr(fact_checker, "_deepinfra_", lambda: client)
 
-    assert fact_checker._chat("system", "user", 12) == "[]"
+    response_format = {"type": "json_object"}
+    assert fact_checker._chat(
+        "system", "user", 12, response_format=response_format
+    ) == "[]"
     assert captured["timeout"] == fact_checker.DEEPINFRA_TIMEOUT_SECONDS
     assert captured["temperature"] == 0
+    assert captured["extra_body"] == {"reasoning_effort": "none"}
+    assert captured["response_format"] == response_format
     assert captured["stream"] is True
     assert response.closed is True
 
@@ -741,8 +746,9 @@ def test_verify_one_uses_one_based_source_references_in_explanation(monkeypatch)
 def test_verify_one_enforces_english_when_model_replies_in_indonesian(monkeypatch):
     captured = {}
 
-    def chat(_system, user, *_args, **_kwargs):
+    def chat(_system, user, *_args, **kwargs):
         captured["user"] = user
+        captured["response_format"] = kwargs.get("response_format")
         return json.dumps([{
             "claim": "x", "supported": True, "contradicted": False, "verdict": "TRUE",
             "confidence": 90,
@@ -760,6 +766,7 @@ def test_verify_one_enforces_english_when_model_replies_in_indonesian(monkeypatc
     )
 
     assert "REQUIRED OUTPUT LANGUAGE: English" in captured["user"]
+    assert captured["response_format"] == fact_checker.VERIFY_RESPONSE_FORMAT
     assert verdict["explanation"] == (
         "The accepted evidence in source [1] directly supports this claim."
     )
