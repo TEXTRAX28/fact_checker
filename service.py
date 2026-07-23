@@ -76,8 +76,8 @@ def _safe_callback(callback: Callable | None, value: Any, label: str) -> None:
         return
     try:
         callback(copy.deepcopy(value))
-    except Exception as exc:
-        print(f"[ERROR] {label} callback: {type(exc).__name__}: {exc}")
+    except Exception:
+        logger.exception("%s callback failed", label)
 
 
 def _callback_wrapper(callback: Callable | None, label: str) -> Callable | None:
@@ -349,7 +349,7 @@ def _outcome_from_pipeline(pipeline_result, *, metadata=None,
 def _run_pipeline(text: str, *, metadata=None, normalized_url=None,
                   on_progress=None, on_result=None, cancel_event=None,
                   on_claims=None, on_evidence=None,
-                  verbose: bool = False, deadline: float | None = None) -> CheckOutcome:
+                  deadline: float | None = None) -> CheckOutcome:
     if _cancelled(cancel_event):
         return CheckOutcome(status="cancelled", message="Fact-check was cancelled.",
                             metadata=metadata, normalized_url=normalized_url)
@@ -361,7 +361,6 @@ def _run_pipeline(text: str, *, metadata=None, normalized_url=None,
             on_claims=_callback_wrapper(on_claims, "Claims"),
             on_evidence=_callback_wrapper(on_evidence, "Evidence"),
             cancel_event=cancel_event,
-            verbose=verbose,
             deadline=deadline,
         )
     except Exception as exc:
@@ -390,7 +389,7 @@ def _run_pipeline(text: str, *, metadata=None, normalized_url=None,
 def check_text(text: str, *, metadata: dict[str, Any] | None = None,
                on_progress=None, on_result=None, cancel_event=None,
                on_claims=None, on_evidence=None,
-               verbose: bool = False, deadline: float | None = None) -> CheckOutcome:
+               deadline: float | None = None) -> CheckOutcome:
     deadline = _resolve_deadline(deadline)
     progress = _callback_wrapper(on_progress, "Progress")
     _safe_callback(progress, {"stage": "validating", "state": "started"}, "Progress")
@@ -410,14 +409,13 @@ def check_text(text: str, *, metadata: dict[str, Any] | None = None,
         on_claims=on_claims,
         on_evidence=on_evidence,
         cancel_event=cancel_event,
-        verbose=verbose,
         deadline=deadline,
     )
 
 
 def check_url(url: str, *, on_progress=None, on_result=None, cancel_event=None,
               on_claims=None, on_evidence=None,
-              verbose: bool = False, deadline: float | None = None) -> CheckOutcome:
+              deadline: float | None = None) -> CheckOutcome:
     deadline = _resolve_deadline(deadline)
     progress = _callback_wrapper(on_progress, "Progress")
     _safe_callback(progress, {"stage": "validating_url", "state": "started"}, "Progress")
@@ -488,7 +486,6 @@ def check_url(url: str, *, on_progress=None, on_result=None, cancel_event=None,
         on_claims=on_claims,
         on_evidence=on_evidence,
         cancel_event=cancel_event,
-        verbose=verbose,
         deadline=deadline,
     )
 

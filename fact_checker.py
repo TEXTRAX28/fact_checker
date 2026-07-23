@@ -1,16 +1,13 @@
 ﻿import json
 import copy
 import difflib
-import io
+import logging
 import os
 import re
-import secrets
-import sys
-import threading
 import time
-from contextlib import contextmanager, redirect_stdout
-from datetime import datetime, timezone
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+
+logger = logging.getLogger(__name__)
 
 SEARCH_WORKERS = 4
 VERIFY_WORKERS = 3
@@ -24,7 +21,6 @@ PROVIDER_MAX_RETRIES = 2
 MAX_EVIDENCE_PER_SOURCE_CHARS = 4_000
 MAX_EVIDENCE_TOTAL_CHARS = 10_000
 VERIFY_BACKLOG_MULTIPLIER = 2
-RAW_RESPONSE_LOG_MAX_CHARS = 8_000
 DEEPINFRA_REASONING_EFFORT = "none"
 
 _LANGUAGE_MARKERS = {
@@ -43,31 +39,6 @@ _LANGUAGE_MARKERS = {
         "oleh", "hanya", "mendukung", "membantah",
     }),
 }
-
-@contextmanager
-def _loading(message: str):
-    # Prints "message." / "message.." / "message..." on a loop, overwriting the same
-    # line, so a slow API call doesn't look like a frozen terminal. Always stops the
-    # spinner in `finally`, even if the wrapped call raises.
-    stop = threading.Event()
-
-    def spin():
-        dots = 0
-        while not stop.is_set():
-            sys.stdout.write(f"\r{message}{'.' * (dots % 4):<3}")
-            sys.stdout.flush()
-            dots += 1
-            time.sleep(0.4)
-        sys.stdout.write("\r" + " " * (len(message) + 3) + "\r")
-        sys.stdout.flush()
-
-    thread = threading.Thread(target=spin, daemon=True)
-    thread.start()
-    try:
-        yield
-    finally:
-        stop.set()
-        thread.join()
 
 class NoEvidenceError(Exception):
     # Raised when a claim has zero search evidence to verify against (search failed or returned nothing usable). 
@@ -98,8 +69,8 @@ def _safe_callback(callback, value, label: str) -> None:
         return
     try:
         callback(copy.deepcopy(value))
-    except Exception as exc:
-        print(f"[ERROR] {label} callback: {type(exc).__name__}: {exc}")
+    except Exception:
+        logger.exception("%s callback failed", label)
 
 
 def _is_timeout(exc: Exception) -> bool:
@@ -411,36 +382,6 @@ VERIFY_RESPONSE_FORMAT = {
 
 
 # DeepInfra client (OpenAI-compatible)
-def _print_raw_response(*, run_id: str, claim_label: str, provider: str, operation: str,
-                        attempt: int, elapsed: float, body, **extra_fields) -> None:
-    # Terminal-only debug output, gated behind --verbose in main.py's CLI. The API
-    # path never sets verbose=True (not wired into api.py/jobs.py), so this never
-    # reaches the extension - it's strictly a `python main.py -v` / `python
-    # fact_checker.py` terminal aid, not something the frontend can trigger or see.
-    lines = [
-        "=" * 80,
-        "RAW PROVIDER RESPONSE",
-        f"timestamp: {datetime.now(timezone.utc).astimezone().isoformat(timespec='milliseconds')}",
-        f"run_id: {run_id}",
-        f"claim: {claim_label}",
-        f"provider: {provider}",
-        f"operation: {operation}",
-        f"attempt: {attempt}",
-        f"elapsed_seconds: {elapsed:.2f}",
-    ]
-    for key, value in extra_fields.items():
-        lines.append(f"{key}: {value}")
-    lines.append("=" * 80)
-
-    body_text = body if isinstance(body, str) else json.dumps(body, indent=2, default=str)
-    if len(body_text) > RAW_RESPONSE_LOG_MAX_CHARS:
-        omitted = len(body_text) - RAW_RESPONSE_LOG_MAX_CHARS
-        body_text = body_text[:RAW_RESPONSE_LOG_MAX_CHARS] + f"\n...truncated ({omitted} more characters)..."
-    lines.append(body_text)
-    lines.append("=" * 80)
-    print("\n".join(lines))
-
-
 def _deepinfra_():
     global _deepinfra_client
     if _deepinfra_client is None:
@@ -499,7 +440,10 @@ def _chat(system: str, user: str, max_tokens: int, *, deadline: float | None = N
             with stream:
                 return _read_chat_stream(stream, deadline)
         except Exception as exc:
-            print(f"[ERROR] DeepInfra attempt {attempt + 1}: {type(exc).__name__}: {exc}")
+            logger.warning(
+                "DeepInfra attempt %d failed: %s: %s",
+                attempt + 1, type(exc).__name__, exc,
+            )
             if (isinstance(exc, WholeJobDeadlineExceeded)
                     or attempt >= PROVIDER_MAX_RETRIES
                     or not _is_retryable(exc)):
@@ -609,10 +553,8 @@ def _filter_sources(results: list[dict]) -> list[dict]:
 def _score(r: dict) -> float:
     return r.get("score", 0)
 
-def _search(query: str, claim_label: str = "", verbose: bool = False,
-            run_id: str = "", deadline: float | None = None) -> tuple[str, list[dict]]:
+def _search(query: str, deadline: float | None = None) -> tuple[str, list[dict]]:
     # Low-quality/UGC domains excluded at the Tavily, not filtered after the fact check.
-    start = time.perf_counter()
     for attempt in range(PROVIDER_MAX_RETRIES + 1):
         try:
             response = _tavily_().search(
@@ -625,7 +567,10 @@ def _search(query: str, claim_label: str = "", verbose: bool = False,
             )
             break
         except Exception as exc:
-            print(f"[ERROR] Tavily attempt {attempt + 1}: {type(exc).__name__}: {exc}")
+            logger.warning(
+                "Tavily attempt %d failed: %s: %s",
+                attempt + 1, type(exc).__name__, exc,
+            )
             if (isinstance(exc, WholeJobDeadlineExceeded)
                     or attempt >= PROVIDER_MAX_RETRIES
                     or not _is_retryable(exc)):
@@ -639,28 +584,6 @@ def _search(query: str, claim_label: str = "", verbose: bool = False,
             passed.append(r)
 
     accepted = _filter_sources(passed)
-
-    accepted_urls = []
-    for r in accepted:
-        accepted_urls.append(r["url"])
-
-    rejected = []
-    for r in raw_results:
-        if r["url"] not in accepted_urls:
-            rejected.append(r)
-    rejected.sort(key=_score, reverse=True)
-
-    if verbose:
-        # One print() call per claim (not one per line): each claim's search runs in its own
-        # worker thread, so a block per print() call keeps concurrent claims' output from
-        # interleaving line-by-line on screen.
-        _print_raw_response(
-            run_id=run_id, claim_label=claim_label, provider="tavily",
-            operation="evidence_search", attempt=attempt + 1,
-            elapsed=time.perf_counter() - start, body=response,
-            query=query, results_returned=len(raw_results),
-            results_accepted=len(accepted), results_rejected=len(rejected),
-        )
 
     # sources[i] and the "[i] ..." block in the evidence text refer to the same
     # source by construction - this index (not the URL) is what the model is
@@ -903,8 +826,7 @@ def _cap_confidence(confidence: int, *, independent_supports: int, has_contradic
     return min(int(confidence), cap)
 
 
-def _verify_one(claim: dict, search_text: str, sources: list[dict], verbose: bool = False,
-                 claim_label: str = "", run_id: str = "",
+def _verify_one(claim: dict, search_text: str, sources: list[dict],
                  deadline: float | None = None,
                  document_language: str | None = None) -> dict | None:
     # One verify call per claim: keeps each verdict paired with its own search results (no positional zip drift) and lets callers reveal results as they land.
@@ -929,7 +851,6 @@ def _verify_one(claim: dict, search_text: str, sources: list[dict], verbose: boo
                f"CLAIM: {claim['claim']}\n"
                f"SEARCH RESULTS:\n{search_text}\n\n"
                f"{language_instruction}")
-    start = time.perf_counter()
     raw_reply = _chat(
         VERIFY_PROMPT,
         context,
@@ -937,24 +858,15 @@ def _verify_one(claim: dict, search_text: str, sources: list[dict], verbose: boo
         deadline=deadline,
         response_format=VERIFY_RESPONSE_FORMAT,
     )
-    if verbose:
-        # One print() call, not several: this claim's verify runs in its own worker thread
-        # alongside every other claim's, so bundling done-time + raw text into a single write
-        # keeps concurrent claims' raw output from interleaving into a garbled mess on screen.
-        _print_raw_response(
-            run_id=run_id, claim_label=claim_label or claim["claim"][:60], provider="deepinfra",
-            operation="claim_verification", attempt=1,
-            elapsed=time.perf_counter() - start, body=raw_reply,
-        )
-
     raw_items, protocol_valid = _parse_provider_array(raw_reply)
     if not protocol_valid:
-        # Printed unconditionally (not gated behind verbose) because this is
-        # genuinely rare and is exactly the evidence needed to diagnose why
-        # parsing failed - without it there's no way to tell what the model
-        # actually returned after the fact.
-        print(f"[ERROR] Verification protocol: could not parse a JSON array or object "
-              f"from the response for {claim['claim'][:60]!r}. Raw response:\n{raw_reply}")
+        # Keep the malformed response in backend logs so protocol failures can be
+        # diagnosed without exposing provider details in the API response.
+        logger.error(
+            "Verification protocol returned no JSON array or object for %r. "
+            "Raw response:\n%s",
+            claim["claim"][:60], raw_reply,
+        )
         raise ProviderProtocolError("verification response was not a JSON array")
 
     parsed = []
@@ -964,8 +876,11 @@ def _verify_one(claim: dict, search_text: str, sources: list[dict], verbose: boo
 
     if not parsed:
         if raw_items:
-            print(f"[ERROR] Verification protocol: parsed {len(raw_items)} object(s) but none "
-                  f"had 'supported'/'contradicted' for {claim['claim'][:60]!r}. Raw response:\n{raw_reply}")
+            logger.error(
+                "Verification protocol parsed %d object(s), but none had "
+                "supported/contradicted for %r. Raw response:\n%s",
+                len(raw_items), claim["claim"][:60], raw_reply,
+            )
             raise ProviderProtocolError("verification response omitted required fields")
         return None
     verdict = parsed[0]
@@ -1062,16 +977,13 @@ def _verify_one(claim: dict, search_text: str, sources: list[dict], verbose: boo
 
     return verdict
 
-def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_progress=None,
+def fact_check(transcript: str, on_result=None, *, on_progress=None,
                on_claims=None, on_evidence=None, cancel_event=None,
                search_workers: int = SEARCH_WORKERS,
                verify_workers: int = VERIFY_WORKERS,
                deadline: float | None = None) -> FactCheckResult:
     """Extract, search, and verify claims while retaining the legacy list interface."""
     errors: list[dict] = []
-    # Only used to label --verbose's raw-response terminal blocks so multiple runs in
-    # the same terminal scrollback can be told apart - not a real job/check identity.
-    run_id = secrets.token_hex(4)
     if deadline is None:
         deadline = time.monotonic() + WHOLE_JOB_DEADLINE_SECONDS
     deadline_reported = False
@@ -1105,38 +1017,21 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
         return finish("timeout")
     if (not isinstance(transcript, str)
             or sum(not char.isspace() for char in transcript) < MIN_INPUT_NON_WHITESPACE):
-        print("Input too short to fact-check, give more sentences to fact-check")
         return finish("invalid_input")
 
     document_language = _detect_supported_language(transcript)
 
     progress("extracting_claims", state="started")
     try:
-        start = time.perf_counter()
-        if verbose:
-            raw = _chat(
-                EXTRACT_PROMPT,
-                transcript,
-                max_tokens=4000,
-                deadline=deadline,
-                response_format=EXTRACT_RESPONSE_FORMAT,
-            )
-            _print_raw_response(
-                run_id=run_id, claim_label="-", provider="deepinfra",
-                operation="claim_extraction", attempt=1,
-                elapsed=time.perf_counter() - start, body=raw,
-            )
-        else:
-            with _loading("Extracting claims (DeepSeek V4 Flash via DeepInfra)"):
-                raw = _chat(
-                    EXTRACT_PROMPT,
-                    transcript,
-                    max_tokens=4000,
-                    deadline=deadline,
-                    response_format=EXTRACT_RESPONSE_FORMAT,
-                )
+        raw = _chat(
+            EXTRACT_PROMPT,
+            transcript,
+            max_tokens=4000,
+            deadline=deadline,
+            response_format=EXTRACT_RESPONSE_FORMAT,
+        )
     except Exception as exc:
-        print(f"[ERROR] Extraction: {type(exc).__name__}: {exc}")
+        logger.exception("Claim extraction failed")
         errors.append(_public_provider_error("extraction", exc))
         if _is_rate_limited(exc):
             return finish("rate_limited")
@@ -1162,14 +1057,10 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
     progress("extracting_claims", state="completed", claim_count=len(claims))
     _safe_callback(on_claims, [dict(claim) for claim in claims], "Claims")
     if not claims:
-        print("No checkable factual claims found, looks like opinion, prediction, or too vague.")
         return finish("no_claims")
     if deadline_expired():
         report_deadline()
         return finish("timeout", claim_count=len(claims))
-
-    print(f"Found {len(claims)} claim(s).")
-    print(f"Verifying {len(claims)} claim(s) (DeepSeek V4 Flash via DeepInfra)...\n")
 
     search_limit = max(1, min(int(search_workers), len(claims)))
     verify_limit = max(1, min(int(verify_workers), len(claims)))
@@ -1195,7 +1086,9 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
 
     def record_error(stage: str, claim_index: int, exc: Exception) -> None:
         nonlocal failed_count, timeout_count, rate_limited_count
-        print(f"[ERROR] {stage.title()}: {type(exc).__name__}: {exc}")
+        logger.warning(
+            "%s failed: %s: %s", stage.title(), type(exc).__name__, exc
+        )
         errors.append(_public_provider_error(stage, exc, claim_index))
         if _is_rate_limited(exc):
             rate_limited_count += 1
@@ -1215,8 +1108,7 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
             progress("searching", state="started", claim_index=claim_index,
                      claim_count=len(claims))
             future = search_pool.submit(
-                _search, claim["query"], f"{claim_index + 1}/{len(claims)}", verbose,
-                run_id, deadline,
+                _search, claim["query"], deadline,
             )
             search_futures[future] = claim_index
             next_search += 1
@@ -1230,8 +1122,8 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
             if cancelled():
                 return
             future = verify_pool.submit(
-                _verify_one, claims[claim_index], search_text, sources, verbose,
-                f"{claim_index + 1}/{len(claims)}", run_id, deadline, document_language,
+                _verify_one, claims[claim_index], search_text, sources,
+                deadline, document_language,
             )
             verify_futures[future] = claim_index
 
@@ -1388,11 +1280,6 @@ def fact_check(transcript: str, on_result=None, verbose: bool = False, *, on_pro
     if failed_count:
         return finish("failed", claim_count=len(claims))
 
-    if no_evidence_count + dropped_count == len(claims):
-        if dropped_count:
-            print(f"{dropped_count} claim(s) dropped (confidence < 60).")
-        print(f"Extracted {len(claims)} claim(s), but none could be verified with enough "
-              "evidence, no source clearly confirmed or denied them.")
     return finish("no_evidence", claim_count=len(claims))
 
 
@@ -1438,7 +1325,7 @@ def retry_claim(claim: dict, claim_index: int, *, evidence: dict | None = None,
         }, "Progress")
         try:
             search_text, sources = _search(
-                claim["query"], f"retry-{claim_index + 1}", deadline=deadline
+                claim["query"], deadline=deadline
             )
         except Exception as exc:
             return failed("search", exc)
@@ -1466,8 +1353,7 @@ def retry_claim(claim: dict, claim_index: int, *, evidence: dict | None = None,
     }, "Progress")
     try:
         verdict = _verify_one(
-            claim, search_text, sources, claim_label=f"retry-{claim_index + 1}",
-            run_id=secrets.token_hex(4), deadline=deadline,
+            claim, search_text, sources, deadline=deadline,
         )
     except NoEvidenceError:
         return finish("no_evidence", errors=[{
@@ -1492,145 +1378,3 @@ def retry_claim(claim: dict, claim_index: int, *, evidence: dict | None = None,
         "stage": "verifying", "state": "completed", "claim_index": claim_index,
     }, "Progress")
     return finish("completed", [verdict])
-
-if __name__ == "__main__":
-    # Self-check: _parse_json_array must survive the malformed JSON the LLM actually emits.
-    clean = '[{"claim":"a","verdict":"TRUE"},{"claim":"b","verdict":"FALSE"}]'
-    bare_enum = '[{"claim":"a","verdict":TRUE,"confidence":90}]'              # unquoted enum (option-3 failure)
-    fenced = '```json\n[{"claim":"a","verdict":"TRUE"}]\n```'
-    trailing = '[{"claim":"a","verdict":"TRUE"},]'                            # trailing comma
-    truncated = ('[{"claim":"a","verdict":TRUE,"sources":["u1"]},'
-                 '{"claim":"b","verdict":FALSE,"sources":["u2"]},'
-                 '{"claim":"c","verdict":')                                   # cut off mid-output
-    explanation_colon = ('[{"claim":"a","verdict":TRUE,"confidence":90,'
-                          '"explanation":"Critics say the verdict is: FALSE, but evidence supports TRUE overall."}]')
-
-    assert len(_parse_json_array(clean)) == 2, "clean"
-    assert len(_parse_json_array(bare_enum)) == 1, "bare enum"
-    assert _parse_json_array(bare_enum)[0]["verdict"] == "TRUE", "enum value"
-    assert len(_parse_json_array(fenced)) == 1, "fenced"
-    assert len(_parse_json_array(trailing)) == 1, "trailing comma"
-    assert len(_parse_json_array(truncated)) == 2, "truncated keeps complete objects"
-    assert _parse_json_array("not json at all") == [], "garbage"
-    assert len(_parse_json_array(explanation_colon)) == 1, "colon inside explanation must not corrupt JSON"
-    assert _parse_json_array(explanation_colon)[0]["verdict"] == "TRUE", "verdict still quoted correctly"
-
-    # A `{[^{}]*}` regex (the old fallback) cannot match an object containing a
-    # nested object/array anywhere in a field - real bug: a live 9/10-claims-checked
-    # run raised ProviderProtocolError on the tenth because of exactly this. The
-    # fallback now uses json.JSONDecoder.raw_decode so nesting doesn't break it.
-    nested = ('[{"claim":"a","verdict":TRUE,"sources":["u1"],'
-              '"meta":{"note":"see [1]","weight":2}}]')
-    assert len(_parse_json_array(nested)) == 1, "nested object/array in a field must not break parsing"
-    assert _parse_json_array(nested)[0]["meta"]["weight"] == 2, "nested value preserved correctly"
-
-    # Same nested-object case, but forcing the object-scan fallback (truncated,
-    # no closing ]) rather than the full-array path - the fallback is the one
-    # that used the naive non-nesting regex before this fix.
-    nested_truncated = ('[{"claim":"a","verdict":TRUE,"sources":["u1"],'
-                         '"meta":{"note":"see [1]","weight":2}},'
-                         '{"claim":"b","verdict":')
-    assert len(_parse_json_array(nested_truncated)) == 1, "fallback scan must handle nesting too"
-    assert _parse_json_array(nested_truncated)[0]["meta"]["weight"] == 2, "fallback preserves nested value"
-
-    # Source ranking: high-quality first, Wikipedia second (above unrecognized domains,
-    # below explicit high-quality ones), everything else keeps its original (Tavily-given)
-    # relative order last.
-    mixed = [{"url": "https://en.wikipedia.org/a"}, {"url": "https://some-blog.com/b"},
-             {"url": "https://reuters.com/c"}, {"url": "https://other-blog.com/d"}]
-    ranked = _filter_sources(mixed)
-    ranked_urls = []
-    for r in ranked:
-        ranked_urls.append(r["url"])
-    assert ranked_urls == ["https://reuters.com/c", "https://en.wikipedia.org/a",
-                           "https://some-blog.com/b"], "high-quality first, wikipedia above unranked domains, order preserved within tiers"
-    assert len(ranked) <= 3, "caps at 3 sources"
-
-    # rank() must match the real host, not any substring in the URL - a spam domain
-    # stuffing a trusted name into a query param must not be ranked as high-quality
-    # (real bug: "domain in r['url']" matched "reuters.com" inside a ?ref= param).
-    spoofed = [{"url": "https://spam.com/?ref=reuters.com"}, {"url": "https://reuters.com/real"}]
-    ranked_spoofed = _filter_sources(spoofed)
-    assert ranked_spoofed[0]["url"] == "https://reuters.com/real", "real host must outrank a spoofed query param"
-
-    # Empty search evidence must raise NoEvidenceError before ever calling the LLM (real bug found live: with search failing entirely, the model answered from its own training knowledge and fabricated citations instead of admitting no evidence was found).
-    raised_no_evidence = False
-    try:
-        _verify_one({"claim": "Earth is square", "speaker": "X"}, "", [])
-    except NoEvidenceError:
-        raised_no_evidence = True
-    assert raised_no_evidence, "empty search evidence must raise NoEvidenceError"
-
-    # _validate_source_analysis: malformed entries are dropped, not fatal.
-    valid_entries = _validate_source_analysis([
-        {"source_index": 0, "stance": "supports", "directness": "direct", "reason": "x", "evidence_excerpt": "q"},
-        {"source_index": 5, "stance": "SUPPORTS"},          # out-of-range index, dropped
-        {"source_index": 1, "stance": "MAYBE"},              # invalid stance, dropped
-        "not even a dict",                                    # dropped
-        {"source_index": 1, "stance": "CONTRADICTS"},         # missing directness, defaults to INDIRECT
-    ], source_count=2)
-    assert len(valid_entries) == 2, "malformed source_analysis entries must be dropped, not fatal"
-    assert valid_entries[0]["stance"] == "SUPPORTS", "stance is uppercased"
-    assert valid_entries[1]["directness"] == "INDIRECT", "missing directness defaults safely"
-    assert _validate_source_analysis(None, source_count=3) == [], "non-list input never raises"
-    assert _validate_source_analysis("not a list", source_count=3) == [], "non-list input never raises"
-
-    # _aggregate_stance is what makes source_analysis authoritative: it must not just
-    # echo whatever the model's own top-level supported/contradicted said.
-    assert _aggregate_stance([{"stance": "SUPPORTS"}, {"stance": "IRRELEVANT"}]) == (True, False)
-    assert _aggregate_stance([{"stance": "CONTRADICTS"}, {"stance": "INSUFFICIENT"}]) == (False, True)
-    assert _aggregate_stance([{"stance": "SUPPORTS"}, {"stance": "CONTRADICTS"}]) == (True, True)
-    assert _aggregate_stance([{"stance": "IRRELEVANT"}]) == (False, False), "topical relevance alone is not support"
-    assert _aggregate_stance([]) == (False, False)
-
-    # _verify_evidence_excerpt: a soft signal, whitespace-normalized substring check.
-    assert _verify_evidence_excerpt("a 50% tariff on steel", "Reports say a  50%\ntariff on steel imports.")
-    assert not _verify_evidence_excerpt("a 90% tariff on steel", "Reports say a 50% tariff on steel imports.")
-    assert not _verify_evidence_excerpt(None, "some content")
-    assert not _verify_evidence_excerpt("quote", "")
-
-    # _group_duplicate_sources: near-identical content groups together (syndicated
-    # copies), clearly different content does not.
-    syndicated = [
-        {"content": "The president announced a 50% tariff on steel imports today."},
-        {"content": "The president announced a 50% tariff on steel imports today, officials said."},
-        {"content": "Meanwhile, the central bank left interest rates unchanged this week."},
-    ]
-    groups = _group_duplicate_sources(syndicated)
-    assert groups[0] == groups[1], "near-identical wire copies must group together"
-    assert groups[2] != groups[0], "unrelated content must not be grouped"
-
-    # _cap_confidence: caps the model's own number silently - no explanatory string,
-    # by design (see the function's own comment).
-    capped = _cap_confidence(98, independent_supports=2, has_contradiction=False,
-                              any_direct=True, all_snippets=False)
-    assert capped == 98, "strong direct evidence is not capped"
-    capped = _cap_confidence(98, independent_supports=0, has_contradiction=False,
-                              any_direct=False, all_snippets=False)
-    assert capped <= _CONFIDENCE_CAP_NO_DIRECT_SOURCE, "no direct source must cap confidence"
-    capped = _cap_confidence(98, independent_supports=1, has_contradiction=True,
-                              any_direct=True, all_snippets=False)
-    assert capped <= _CONFIDENCE_CAP_UNRESOLVED_CONTRADICTION, "unresolved contradiction caps hardest"
-
-    # _print_raw_response: terminal-only debug output, gated by the caller's own
-    # `if verbose:` checks (this function itself has no gate) - confirms the required
-    # fields render and that a genuinely huge body actually gets truncated, not just
-    # decorated with a marker on top of the full text.
-    captured = io.StringIO()
-    with redirect_stdout(captured):
-        _print_raw_response(run_id="test1234", claim_label="1/1", provider="test",
-                             operation="test_op", attempt=1, elapsed=0.5, body="x" * 20_000,
-                             extra_field="present")
-    output = captured.getvalue()
-    assert "run_id: test1234" in output and "extra_field: present" in output
-    assert "...truncated (" in output, "a body over the cap must be truncated with a marker"
-    assert len(output) < 20_000 + 1_000, "truncation must actually shrink a huge body, not just append a marker"
-
-    captured = io.StringIO()
-    with redirect_stdout(captured):
-        _print_raw_response(run_id="t", claim_label="-", provider="test", operation="test_op",
-                             attempt=1, elapsed=0.1, body={"a": 1})
-    assert '"a": 1' in captured.getvalue(), "a non-string body must be pretty-printed as JSON"
-
-    print("OK: all self-checks pass")
-    

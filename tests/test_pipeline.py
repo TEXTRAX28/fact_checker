@@ -70,6 +70,42 @@ def test_provider_json_parser_repairs_invalid_backslash_escapes():
     }]
 
 
+def test_provider_json_parser_repairs_common_protocol_damage():
+    cases = [
+        ('[{"claim":"a","verdict":TRUE}]', 1),
+        ('```json\n[{"claim":"a","verdict":"TRUE"}]\n```', 1),
+        ('[{"claim":"a","verdict":"TRUE"},]', 1),
+        (
+            '[{"claim":"a","verdict":TRUE,"meta":{"weight":2}},'
+            '{"claim":"b","verdict":',
+            1,
+        ),
+    ]
+
+    for raw, expected_count in cases:
+        parsed, protocol_valid = fact_checker._parse_provider_array(raw)
+        assert protocol_valid is True
+        assert len(parsed) == expected_count
+
+    nested, _ = fact_checker._parse_provider_array(cases[-1][0])
+    assert nested[0]["meta"]["weight"] == 2
+
+
+def test_source_ranking_uses_hostname_not_url_substrings():
+    ranked = fact_checker._filter_sources([
+        {"url": "https://spam.example/?ref=reuters.com"},
+        {"url": "https://en.wikipedia.org/wiki/Example"},
+        {"url": "https://reuters.com/real"},
+        {"url": "https://unranked.example/story"},
+    ])
+
+    assert [result["url"] for result in ranked] == [
+        "https://reuters.com/real",
+        "https://en.wikipedia.org/wiki/Example",
+        "https://spam.example/?ref=reuters.com",
+    ]
+
+
 def test_callback_exceptions_do_not_discard_pipeline_results(monkeypatch):
     monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: extraction_payload(1))
     monkeypatch.setattr(
@@ -86,14 +122,13 @@ def test_callback_exceptions_do_not_discard_pipeline_results(monkeypatch):
         "A sufficiently long factual sentence.",
         on_progress=broken_callback,
         on_result=broken_callback,
-        verbose=True,
     )
 
     assert result.status == "completed"
     assert len(result) == 1
 
 
-def test_legacy_positional_on_result_and_verbose_arguments_still_work(monkeypatch):
+def test_positional_on_result_argument_still_works(monkeypatch):
     emitted = []
     monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: extraction_payload(1))
     monkeypatch.setattr(
@@ -104,7 +139,7 @@ def test_legacy_positional_on_result_and_verbose_arguments_still_work(monkeypatc
     )
 
     result = fact_checker.fact_check(
-        "A sufficiently long factual sentence.", emitted.append, True
+        "A sufficiently long factual sentence.", emitted.append
     )
 
     assert result.status == "completed"
@@ -114,7 +149,7 @@ def test_legacy_positional_on_result_and_verbose_arguments_still_work(monkeypatc
 def test_extraction_with_no_claims_has_distinct_status(monkeypatch):
     monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: "[]")
 
-    result = fact_checker.fact_check("This is a sufficiently long opinion.", verbose=True)
+    result = fact_checker.fact_check("This is a sufficiently long opinion.")
 
     assert result.status == "no_claims"
     assert result.claim_count == 0
@@ -137,7 +172,7 @@ def test_cancellation_stops_unscheduled_verification(monkeypatch):
     monkeypatch.setattr(fact_checker, "_verify_one", verify)
 
     result = fact_checker.fact_check(
-        "A sufficiently long factual sentence.", cancel_event=event, verbose=True
+        "A sufficiently long factual sentence.", cancel_event=event
     )
 
     assert result.status == "cancelled"
@@ -170,7 +205,7 @@ def test_search_and_verification_concurrency_are_bounded(monkeypatch):
     monkeypatch.setattr(fact_checker, "_search", search)
     monkeypatch.setattr(fact_checker, "_verify_one", verify)
 
-    result = fact_checker.fact_check("A sufficiently long factual sentence.", verbose=True)
+    result = fact_checker.fact_check("A sufficiently long factual sentence.")
 
     assert result.status == "completed"
     assert peak["search"] <= fact_checker.SEARCH_WORKERS
@@ -206,7 +241,7 @@ def test_results_emit_in_completion_order_with_stable_claim_pairing(monkeypatch)
     monkeypatch.setattr(fact_checker, "_verify_one", verify)
 
     result = fact_checker.fact_check(
-        "A sufficiently long factual sentence.", on_result=on_result, verbose=True
+        "A sufficiently long factual sentence.", on_result=on_result
     )
 
     assert [item["claim_index"] for item in emitted] == [1, 0, 2]
@@ -221,7 +256,7 @@ def test_no_search_evidence_has_distinct_status(monkeypatch):
     emitted = []
 
     result = fact_checker.fact_check(
-        "A sufficiently long factual sentence.", on_result=emitted.append, verbose=True
+        "A sufficiently long factual sentence.", on_result=emitted.append
     )
 
     assert result.status == "no_evidence"
@@ -246,7 +281,7 @@ def test_one_evidence_miss_does_not_leave_a_partial_blank_claim(monkeypatch):
         fact_checker, "_verify_one", lambda claim, *_args, **_kwargs: verdict_for(claim)
     )
 
-    result = fact_checker.fact_check("A sufficiently long factual sentence.", verbose=True)
+    result = fact_checker.fact_check("A sufficiently long factual sentence.")
 
     assert result.status == "completed"
     by_index = {item["claim_index"]: item for item in result}
@@ -268,7 +303,7 @@ def test_per_future_failure_preserves_partial_result(monkeypatch):
         fact_checker, "_verify_one", lambda claim, *_args, **_kwargs: verdict_for(claim)
     )
 
-    result = fact_checker.fact_check("A sufficiently long factual sentence.", verbose=True)
+    result = fact_checker.fact_check("A sufficiently long factual sentence.")
 
     assert result.status == "partial"
     assert [item["claim_index"] for item in result] == [1]
@@ -283,7 +318,7 @@ def test_provider_timeout_has_distinct_status(monkeypatch):
         lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("provider slow")),
     )
 
-    result = fact_checker.fact_check("A sufficiently long factual sentence.", verbose=True)
+    result = fact_checker.fact_check("A sufficiently long factual sentence.")
 
     assert result.status == "timeout"
 
@@ -297,7 +332,6 @@ def test_expired_whole_job_deadline_stops_before_extraction(monkeypatch):
 
     result = fact_checker.fact_check(
         "A sufficiently long factual sentence.",
-        verbose=True,
         deadline=time.monotonic() - 1,
     )
 
@@ -323,7 +357,6 @@ def test_deadline_expiring_during_extraction_does_not_start_search(monkeypatch):
 
     result = fact_checker.fact_check(
         "A sufficiently long factual sentence.",
-        verbose=True,
         deadline=time.monotonic() + 0.01,
     )
 
@@ -347,7 +380,6 @@ def test_whole_job_deadline_preserves_completed_verdicts(monkeypatch):
 
     result = fact_checker.fact_check(
         "A sufficiently long factual sentence.",
-        verbose=True,
         verify_workers=1,
         deadline=time.monotonic() + 0.2,
     )
@@ -370,7 +402,7 @@ def test_claims_are_hard_capped_in_code(monkeypatch):
         fact_checker, "_verify_one", lambda claim, *_args, **_kwargs: verdict_for(claim)
     )
 
-    result = fact_checker.fact_check("A sufficiently long factual sentence.", verbose=True)
+    result = fact_checker.fact_check("A sufficiently long factual sentence.")
 
     assert result.status == "completed"
     assert result.claim_count == fact_checker.MAX_CLAIMS
@@ -391,7 +423,7 @@ def test_result_callback_receives_a_deep_copy(monkeypatch):
         value["sources"][0] = "https://attacker.invalid"
 
     result = fact_checker.fact_check(
-        "A sufficiently long factual sentence.", on_result=mutate, verbose=True
+        "A sufficiently long factual sentence.", on_result=mutate
     )
 
     assert result[0]["verdict"] == "TRUE"
@@ -423,7 +455,6 @@ def test_cancellation_waits_for_running_provider_threads_and_ignores_late_result
                 "A sufficiently long factual sentence.",
                 on_result=emitted.append,
                 cancel_event=event,
-                verbose=True,
             ),
         )
     )
@@ -477,7 +508,7 @@ def test_verify_future_backlog_is_bounded(monkeypatch):
 
     monkeypatch.setattr(fact_checker, "_verify_one", verify)
 
-    result = fact_checker.fact_check("A sufficiently long factual sentence.", verbose=True)
+    result = fact_checker.fact_check("A sufficiently long factual sentence.")
 
     assert result.status == "completed"
     assert peak["fact-verify"] <= (
@@ -659,7 +690,7 @@ def test_all_malformed_verification_outputs_fail(monkeypatch):
         fact_checker, "_search", lambda *_args, **_kwargs: ("evidence", [one_source()])
     )
 
-    result = fact_checker.fact_check("A sufficiently long factual sentence.", verbose=True)
+    result = fact_checker.fact_check("A sufficiently long factual sentence.")
 
     assert result.status == "failed"
     assert {error["code"] for error in result.errors} == {"provider_protocol_error"}
@@ -679,7 +710,7 @@ def test_malformed_verification_with_success_is_partial(monkeypatch):
 
     monkeypatch.setattr(fact_checker, "_verify_one", verify)
 
-    result = fact_checker.fact_check("A sufficiently long factual sentence.", verbose=True)
+    result = fact_checker.fact_check("A sufficiently long factual sentence.")
 
     assert result.status == "partial"
     assert [item["claim"] for item in result] == ["claim-0"]
@@ -878,7 +909,7 @@ def test_retry_claim_reports_insufficient_evidence_as_non_provider_failure(monke
 def test_malformed_extraction_is_not_no_claims(monkeypatch):
     monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: "not JSON")
 
-    result = fact_checker.fact_check("A sufficiently long factual sentence.", verbose=True)
+    result = fact_checker.fact_check("A sufficiently long factual sentence.")
 
     assert result.status == "failed"
     assert result.errors[0]["code"] == "provider_protocol_error"
@@ -897,7 +928,7 @@ def test_rate_limit_status_and_errors_are_sanitized(monkeypatch):
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RateLimited()),
     )
 
-    result = fact_checker.fact_check("A sufficiently long factual sentence.", verbose=True)
+    result = fact_checker.fact_check("A sufficiently long factual sentence.")
 
     assert result.status == "rate_limited"
     assert result.errors == [{

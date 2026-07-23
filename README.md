@@ -1,8 +1,7 @@
 # Fact Checker
 
 An evidence-based fact-checking application for articles and pasted text. The
-primary interface is a Chrome extension backed by a local FastAPI service. A
-terminal interface remains available as a fallback for testing and diagnostics.
+interface is a Chrome extension backed by a FastAPI service.
 
 The checker extracts factual claims, searches the web for evidence, and assigns
 one of three verdicts:
@@ -29,12 +28,6 @@ The side panel displays progress and completed verdicts as they arrive. It also
 supports cancellation, reconnection through snapshot polling, and JSON or
 Markdown export.
 
-### Terminal fallback
-
-`main.py` provides Article URL and Paste Text modes for testing when the Chrome
-extension is unavailable. It uses the same service and fact-checking pipeline as
-the extension; it is not a separate implementation.
-
 ## Architecture
 
 ```text
@@ -45,10 +38,6 @@ api.py -> jobs.py -> service.py -> fact_checker.py
                                       |
                                       +-> DeepInfra (claim extraction and verification)
                                       +-> Tavily (evidence search)
-
-main.py -> service.py -> fact_checker.py
-              |
-              +-> display.py (terminal formatting only)
 ```
 
 Responsibilities are intentionally separated:
@@ -60,16 +49,16 @@ Responsibilities are intentionally separated:
 | `jobs.py` | Background execution, capacity limits, cancellation, progress events, snapshots, and event replay |
 | `api.py` | FastAPI validation, CORS, optional authentication, job endpoints, and Server-Sent Events |
 | `extension/` | Manifest V3 side panel, active-page extraction, API client, progress UI, results, and exports |
-| `main.py` / `display.py` | Optional terminal fallback and terminal-only formatting |
 
-The extension and terminal interface both use `service.py`; prompts and verdict
+The extension sends requests to the API, while `service.py` keeps application
+behavior separate from HTTP and background-job concerns. Prompts and verdict
 logic are not duplicated in frontend code.
 
 ## Verification Pipeline
 
 1. Validate and normalize the submitted URL or text.
 2. For URL mode, retrieve readable article content through Jina Reader.
-3. Ask Llama 3.3 70B through DeepInfra to extract up to 15 factual claims and a
+3. Ask DeepSeek V4 Flash through DeepInfra to extract up to 15 factual claims and a
    targeted search query for each claim.
 4. Search Tavily for evidence, excluding configured social and user-generated
    domains and rejecting low-relevance results.
@@ -165,18 +154,6 @@ Load the extension:
 The local extension build permits only `localhost` and `127.0.0.1` backend
 connections.
 
-## Run the Terminal Fallback
-
-```powershell
-python main.py
-```
-
-Use `--verbose` to print bounded raw provider responses and timing information:
-
-```powershell
-python main.py --verbose
-```
-
 ## API Overview
 
 | Method | Endpoint | Purpose |
@@ -249,8 +226,6 @@ fact-checker/
   jobs.py
   service.py
   fact_checker.py
-  main.py
-  display.py
   requirements.txt
   requirements-dev.txt
   tests/

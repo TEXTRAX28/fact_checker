@@ -23,9 +23,7 @@ from jobs import (
     JobManager,
 )
 
-# main.py (the CLI) loads .env too; this call is needed here because api.py no
-# longer imports main.py (service.py is the shared boundary instead), so that
-# side effect doesn't happen for free when running the API standalone.
+# Load backend configuration before constructing provider clients or the job manager.
 load_dotenv()
 
 
