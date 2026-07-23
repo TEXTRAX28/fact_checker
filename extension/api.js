@@ -1,6 +1,8 @@
 import { API_BASE_URL, CLIENT_LIMITS } from "./config.js";
 
 const API_ORIGIN = new URL(API_BASE_URL).origin;
+const PROVIDER_KEY_MIN_LENGTH = 8;
+const PROVIDER_KEY_MAX_LENGTH = 512;
 
 export class ApiError extends Error {
   constructor(message, { status = 0, code = "request_failed", details = null } = {}) {
@@ -35,6 +37,47 @@ export function normalizeHttpUrl(value) {
   }
   url.hash = "";
   return url.toString();
+}
+
+export function normalizeProviderCredentials(value = {}) {
+  const credentials = {
+    deepinfraKey: String(value.deepinfraKey || "").trim(),
+    tavilyKey: String(value.tavilyKey || "").trim(),
+  };
+  if (!validProviderKey(credentials.deepinfraKey)) {
+    throw new ApiError("Enter a valid DeepInfra API key.", { code: "missing_deepinfra_key" });
+  }
+  if (!validProviderKey(credentials.tavilyKey)) {
+    throw new ApiError("Enter a valid Tavily API key.", { code: "missing_tavily_key" });
+  }
+  return credentials;
+}
+
+function validProviderKey(key) {
+  return key.length >= PROVIDER_KEY_MIN_LENGTH
+    && key.length <= PROVIDER_KEY_MAX_LENGTH
+    && !/\s/.test(key);
+}
+
+function providerHeaders(credentials) {
+  const normalized = normalizeProviderCredentials(credentials);
+  return {
+    "X-DeepInfra-Key": normalized.deepinfraKey,
+    "X-Tavily-Key": normalized.tavilyKey,
+  };
+}
+
+function accessHeaders(jobToken) {
+  if (!jobToken) {
+    throw new ApiError("This check no longer has an access token. Start a new check.", {
+      code: "missing_job_token",
+    });
+  }
+  return { Authorization: `Bearer ${jobToken}` };
+}
+
+function clientHeaders(clientId) {
+  return clientId ? { "X-Client-Id": clientId } : {};
 }
 
 export function buildCheckPayload({ mode, page, url, text, forceRefresh = false }) {
@@ -97,7 +140,10 @@ async function requestJson(path, options = {}) {
   try {
     const response = await fetch(apiUrl(path), {
       method: options.method || "GET",
-      headers: options.body ? { "Content-Type": "application/json" } : undefined,
+      headers: {
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        ...(options.headers || {}),
+      },
       body: options.body ? JSON.stringify(options.body) : undefined,
       cache: "no-store",
       signal: controller.signal,
@@ -125,7 +171,7 @@ async function requestJson(path, options = {}) {
     if (error?.name === "AbortError") {
       throw new ApiError("The backend did not respond in time.", { code: "timeout" });
     }
-    throw new ApiError("Cannot reach the local fact-checking backend.", {
+    throw new ApiError("Cannot reach the fact-checking backend.", {
       code: "backend_offline",
       details: error?.message || null,
     });
@@ -138,31 +184,127 @@ export function getHealth() {
   return requestJson("/health", { timeoutMs: 4_000 });
 }
 
-export function createCheck(payload) {
+export function createCheck(payload, credentials, clientId) {
   return requestJson("/v1/checks", {
     method: "POST",
     body: payload,
+    headers: {
+      ...providerHeaders(credentials),
+      ...clientHeaders(clientId),
+    },
     expectedStatus: 202,
     timeoutMs: 15_000,
   });
 }
 
-export function getCheckSnapshot(checkId, snapshotPath) {
+export function getCheckSnapshot(checkId, snapshotPath, jobToken, clientId) {
   return requestJson(snapshotPath || `/v1/checks/${encodeURIComponent(checkId)}`, {
+    headers: {
+      ...accessHeaders(jobToken),
+      ...clientHeaders(clientId),
+    },
     timeoutMs: 10_000,
   });
 }
 
-export function cancelCheck(checkId) {
+export function cancelCheck(checkId, jobToken, clientId) {
   return requestJson(`/v1/checks/${encodeURIComponent(checkId)}`, {
     method: "DELETE",
+    headers: {
+      ...accessHeaders(jobToken),
+      ...clientHeaders(clientId),
+    },
     timeoutMs: 10_000,
   });
 }
 
-export function retryCheckClaim(checkId, claimIndex) {
+export function retryCheckClaim(
+  checkId, claimIndex, jobToken, credentials, clientId,
+) {
   return requestJson(
     `/v1/checks/${encodeURIComponent(checkId)}/claims/${encodeURIComponent(claimIndex)}/retry`,
-    { method: "POST", expectedStatus: 202, timeoutMs: 15_000 },
+    {
+      method: "POST",
+      headers: {
+        ...accessHeaders(jobToken),
+        ...providerHeaders(credentials),
+        ...clientHeaders(clientId),
+      },
+      expectedStatus: 202,
+      timeoutMs: 15_000,
+    },
   );
+}
+
+function parseEventBlock(block) {
+  let type = "message";
+  let lastEventId = "";
+  const data = [];
+  for (const line of block.split(/\r?\n/)) {
+    if (!line || line.startsWith(":")) continue;
+    const separator = line.indexOf(":");
+    const field = separator >= 0 ? line.slice(0, separator) : line;
+    const value = separator >= 0 ? line.slice(separator + 1).replace(/^ /, "") : "";
+    if (field === "event") type = value;
+    if (field === "id") lastEventId = value;
+    if (field === "data") data.push(value);
+  }
+  return { type, lastEventId, data: data.join("\n") };
+}
+
+export async function streamCheckEvents({
+  eventsPath,
+  jobToken,
+  clientId,
+  lastEventId = 0,
+  signal,
+  onEvent,
+}) {
+  const response = await fetch(apiUrl(eventsPath), {
+    method: "GET",
+    headers: {
+      Accept: "text/event-stream",
+      ...accessHeaders(jobToken),
+      ...clientHeaders(clientId),
+      ...(lastEventId ? { "Last-Event-ID": String(lastEventId) } : {}),
+    },
+    cache: "no-store",
+    signal,
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    let detail = body;
+    try {
+      const data = JSON.parse(body);
+      detail = data?.detail || "";
+    } catch {}
+    throw new ApiError(detail || `Event stream failed (${response.status}).`, {
+      status: response.status,
+      code: "stream_failed",
+    });
+  }
+  if (!response.body) {
+    throw new ApiError("The backend returned an empty event stream.", {
+      code: "stream_unavailable",
+    });
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      const blocks = buffer.split(/\r?\n\r?\n/);
+      buffer = blocks.pop() || "";
+      for (const block of blocks) {
+        if (!block.trim()) continue;
+        onEvent(parseEventBlock(block));
+      }
+      if (done) break;
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }

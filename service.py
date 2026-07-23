@@ -20,6 +20,7 @@ from fact_checker import (
     fact_check,
     retry_claim as retry_fact_claim,
 )
+from providers import ProviderContext
 
 JINA_TIMEOUT_SECONDS = 12.0
 MAX_ARTICLE_BYTES = 2 * 1024 * 1024
@@ -59,6 +60,7 @@ class CheckOutcome:
     message: str = ""
     normalized_url: str | None = None
     metadata: dict[str, Any] | None = None
+    usage: dict[str, Any] = field(default_factory=dict)
 
     @property
     def completed_count(self) -> int:
@@ -76,8 +78,8 @@ def _safe_callback(callback: Callable | None, value: Any, label: str) -> None:
         return
     try:
         callback(copy.deepcopy(value))
-    except Exception:
-        logger.exception("%s callback failed", label)
+    except Exception as exc:
+        logger.warning("%s callback failed (%s)", label, type(exc).__name__)
 
 
 def _callback_wrapper(callback: Callable | None, label: str) -> Callable | None:
@@ -343,13 +345,15 @@ def _outcome_from_pipeline(pipeline_result, *, metadata=None,
         message=message,
         metadata=metadata,
         normalized_url=normalized_url,
+        usage=copy.deepcopy(getattr(pipeline_result, "usage", {})),
     )
 
 
 def _run_pipeline(text: str, *, metadata=None, normalized_url=None,
                   on_progress=None, on_result=None, cancel_event=None,
                   on_claims=None, on_evidence=None,
-                  deadline: float | None = None) -> CheckOutcome:
+                  deadline: float | None = None,
+                  provider_context: ProviderContext | None = None) -> CheckOutcome:
     if _cancelled(cancel_event):
         return CheckOutcome(status="cancelled", message="Fact-check was cancelled.",
                             metadata=metadata, normalized_url=normalized_url)
@@ -362,9 +366,10 @@ def _run_pipeline(text: str, *, metadata=None, normalized_url=None,
             on_evidence=_callback_wrapper(on_evidence, "Evidence"),
             cancel_event=cancel_event,
             deadline=deadline,
+            provider_context=provider_context,
         )
     except Exception as exc:
-        logger.exception("Fact-check pipeline failed")
+        logger.warning("Fact-check pipeline failed (%s)", type(exc).__name__)
         if _is_rate_limited(exc):
             status, code = "rate_limited", "provider_rate_limited"
         elif _is_timeout(exc):
@@ -389,7 +394,8 @@ def _run_pipeline(text: str, *, metadata=None, normalized_url=None,
 def check_text(text: str, *, metadata: dict[str, Any] | None = None,
                on_progress=None, on_result=None, cancel_event=None,
                on_claims=None, on_evidence=None,
-               deadline: float | None = None) -> CheckOutcome:
+               deadline: float | None = None,
+               provider_context: ProviderContext | None = None) -> CheckOutcome:
     deadline = _resolve_deadline(deadline)
     progress = _callback_wrapper(on_progress, "Progress")
     _safe_callback(progress, {"stage": "validating", "state": "started"}, "Progress")
@@ -410,12 +416,14 @@ def check_text(text: str, *, metadata: dict[str, Any] | None = None,
         on_evidence=on_evidence,
         cancel_event=cancel_event,
         deadline=deadline,
+        provider_context=provider_context,
     )
 
 
 def check_url(url: str, *, on_progress=None, on_result=None, cancel_event=None,
               on_claims=None, on_evidence=None,
-              deadline: float | None = None) -> CheckOutcome:
+              deadline: float | None = None,
+              provider_context: ProviderContext | None = None) -> CheckOutcome:
     deadline = _resolve_deadline(deadline)
     progress = _callback_wrapper(on_progress, "Progress")
     _safe_callback(progress, {"stage": "validating_url", "state": "started"}, "Progress")
@@ -445,15 +453,15 @@ def check_url(url: str, *, on_progress=None, on_result=None, cancel_event=None,
             normalized_url=normalized_url,
         )
     except httpx.TimeoutException:
-        logger.exception("Jina Reader timed out")
+        logger.warning("Jina Reader timed out")
         return CheckOutcome(
             status="timeout",
             errors=[_error("article_fetch", "article_timeout")],
             message="Jina Reader timed out.",
             normalized_url=normalized_url,
         )
-    except Exception:
-        logger.exception("Jina Reader failed")
+    except Exception as exc:
+        logger.warning("Jina Reader failed (%s)", type(exc).__name__)
         return CheckOutcome(
             status="unreadable",
             errors=[_error("article_fetch", "article_unreadable")],
@@ -487,12 +495,14 @@ def check_url(url: str, *, on_progress=None, on_result=None, cancel_event=None,
         on_evidence=on_evidence,
         cancel_event=cancel_event,
         deadline=deadline,
+        provider_context=provider_context,
     )
 
 
 def retry_claim(claim: dict, claim_index: int, *, evidence: dict | None = None,
                 on_progress=None, on_evidence=None, cancel_event=None,
-                deadline: float | None = None) -> CheckOutcome:
+                deadline: float | None = None,
+                provider_context: ProviderContext | None = None) -> CheckOutcome:
     pipeline_result = retry_fact_claim(
         claim,
         claim_index,
@@ -501,5 +511,6 @@ def retry_claim(claim: dict, claim_index: int, *, evidence: dict | None = None,
         on_evidence=_callback_wrapper(on_evidence, "Evidence"),
         cancel_event=cancel_event,
         deadline=deadline,
+        provider_context=provider_context,
     )
     return _outcome_from_pipeline(pipeline_result)

@@ -45,9 +45,10 @@ Responsibilities are intentionally separated:
 | Component | Responsibility |
 | --- | --- |
 | `fact_checker.py` | Claim extraction, evidence search, verification, verdict derivation, and bounded per-claim concurrency |
+| `providers.py` | Immutable per-job credentials, provider clients, global concurrency gates, and usage accounting |
 | `service.py` | Text validation, URL safety, Jina article retrieval, error sanitization, and shared application entry points |
-| `jobs.py` | Background execution, capacity limits, cancellation, progress events, snapshots, and event replay |
-| `api.py` | FastAPI validation, CORS, optional authentication, job endpoints, and Server-Sent Events |
+| `jobs.py` | Background execution, capability access, capacity limits, cancellation, progress events, snapshots, and event replay |
+| `api.py` | FastAPI validation, exact CORS, BYOK headers, job endpoints, and authenticated Server-Sent Events |
 | `extension/` | Manifest V3 side panel, active-page extraction, API client, progress UI, results, and exports |
 
 The extension sends requests to the API, while `service.py` keeps application
@@ -84,6 +85,10 @@ results retain their original claim indexes even when they finish out of order.
   LinkedIn are excluded from Tavily searches.
 - Retrieved source content is bounded before it enters an LLM prompt.
 - Provider failures are sanitized before being returned through the API.
+- Provider keys are isolated per job and never enter snapshots, events, or
+  exports.
+- Hosted jobs share explicit process-wide DeepInfra and Tavily concurrency
+  limits.
 
 ## Requirements
 
@@ -114,7 +119,13 @@ python -m pip install -r requirements-dev.txt
 
 For runtime-only installation, use `requirements.txt` instead.
 
-Create the private environment file from the public template:
+The extension uses bring-your-own-key (BYOK). Start the API, open the key button
+in the side panel, and enter the DeepInfra and Tavily keys that should pay for
+the check. Keys are stored in `chrome.storage.session`, so closing Chrome clears
+them.
+
+An `.env` file is optional. It is only a fallback for direct local engine
+diagnostics outside the extension. To use that fallback:
 
 ```powershell
 Copy-Item .env.example .env
@@ -156,13 +167,16 @@ connections.
 
 ## API Overview
 
-| Method | Endpoint | Purpose |
-| --- | --- | --- |
-| `GET` | `/health` | Backend readiness |
-| `POST` | `/v1/checks` | Create a Current Page, URL, or Text check |
-| `GET` | `/v1/checks/{job_id}` | Read the current job snapshot |
-| `GET` | `/v1/checks/{job_id}/events` | Stream job events through SSE |
-| `DELETE` | `/v1/checks/{job_id}` | Request cancellation |
+| Method | Endpoint | Access | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/health` | Public | Backend readiness |
+| `GET` | `/privacy` | Public | Privacy policy |
+| `GET` | `/support` | Public | Support information |
+| `POST` | `/v1/checks` | DeepInfra and Tavily key headers | Create a check |
+| `GET` | `/v1/checks/{job_id}` | Job bearer capability | Read the current snapshot |
+| `GET` | `/v1/checks/{job_id}/events` | Job bearer capability | Stream events through SSE |
+| `DELETE` | `/v1/checks/{job_id}` | Job bearer capability | Request cancellation |
+| `POST` | `/v1/checks/{job_id}/claims/{claim_index}/retry` | Job bearer capability and provider key headers | Retry one failed claim |
 
 Example Text request:
 
@@ -173,8 +187,50 @@ Example Text request:
 }
 ```
 
-Job execution is asynchronous. `POST /v1/checks` returns HTTP 202 with a job
-snapshot rather than holding the request open until every verdict is complete.
+Job execution is asynchronous. `POST /v1/checks` returns HTTP 202 with a
+one-time `job_token` and the initial snapshot. The backend stores only its
+SHA-256 hash. Every later job operation sends the token as
+`Authorization: Bearer <job_token>`.
+
+## Usage Accounting
+
+The side panel and exports show cumulative DeepInfra input, output, and total
+tokens plus Tavily search attempts and estimated credits. DeepInfra values come
+from provider-reported stream metadata. Tavily advanced searches are labeled as
+an estimate of two credits per successful search. A partial marker is shown
+when a provider fails or does not report token usage. Replayed SSE events replace
+cumulative totals instead of adding them again.
+
+## Railway Beta Configuration
+
+The repository includes a one-service Railpack configuration. Railway should
+run one replica because jobs and capability hashes are held in process memory.
+Set:
+
+```dotenv
+APP_ENV=production
+CORS_ORIGINS=chrome-extension://your_32_character_extension_id
+JOB_MAX_WORKERS=1
+JOB_CAPACITY=8
+JOB_CREATION_RATE_LIMIT=5
+DEEPINFRA_CONCURRENCY=3
+TAVILY_CONCURRENCY=4
+```
+
+Do not set developer DeepInfra or Tavily keys on Railway. After Railway assigns
+an HTTPS domain, configure the extension and its exact host permission together:
+
+```powershell
+Push-Location extension
+npm run configure:backend -- https://your-service.up.railway.app
+npm run check
+Pop-Location
+```
+
+For local development again, run the same command with
+`http://127.0.0.1:8000`. Production startup fails when `CORS_ORIGINS` is empty
+or is not an exact `chrome-extension://` origin. API documentation is disabled
+in production.
 
 ## Tests
 
@@ -199,8 +255,9 @@ assets, script syntax, API configuration location, and icon file dimensions.
 
 ## Current Scope and Limitations
 
-- This repository is currently designed for local use. The API binds to
-  `127.0.0.1` by default.
+- The default configuration is local. `railway.json` provides the hosted
+  process command, but deployment still requires a Railway project and the
+  environment configuration above.
 - Jobs and event history are stored in memory and disappear when the API
   process restarts.
 - Cancellation is best-effort. A provider call already in progress may run
@@ -208,10 +265,10 @@ assets, script syntax, API configuration location, and icon file dimensions.
 - Each check has a 300-second wall-clock deadline. Provider calls use the smaller
   of their own timeout and the remaining job budget; completed verdicts are
   preserved if the deadline produces a partial result.
-- Current Page mode sends extracted page text to the local backend. Relevant
+- Current Page mode sends extracted page text to the configured backend. Relevant
   claim and evidence content is sent to the configured external providers.
-- The extension is not yet configured for a hosted public API or Chrome Web
-  Store distribution.
+- Anonymous capability access protects individual jobs but is not user
+  authentication. The first hosted release should remain a small friend beta.
 
 Earlier project experiments and planning discussed microphone input, live-stream
 checking, speech-to-text, and a Wayback Machine article fallback. Those features
@@ -224,8 +281,10 @@ notes remain under `docs/` for local project reference.
 fact-checker/
   api.py
   jobs.py
+  providers.py
   service.py
   fact_checker.py
+  public/
   requirements.txt
   requirements-dev.txt
   tests/

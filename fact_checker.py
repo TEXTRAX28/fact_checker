@@ -2,10 +2,11 @@
 import copy
 import difflib
 import logging
-import os
 import re
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+
+from providers import ProviderContext
 
 logger = logging.getLogger(__name__)
 
@@ -57,11 +58,13 @@ class FactCheckResult(list):
     """List-compatible pipeline result with enough metadata for service adapters."""
 
     def __init__(self, values=(), *, status: str = "completed", claim_count: int = 0,
-                 errors: list[dict] | None = None):
+                 errors: list[dict] | None = None,
+                 usage: dict | None = None):
         super().__init__(values)
         self.status = status
         self.claim_count = claim_count
         self.errors = errors or []
+        self.usage = usage or {}
 
 
 def _safe_callback(callback, value, label: str) -> None:
@@ -69,8 +72,8 @@ def _safe_callback(callback, value, label: str) -> None:
         return
     try:
         callback(copy.deepcopy(value))
-    except Exception:
-        logger.exception("%s callback failed", label)
+    except Exception as exc:
+        logger.warning("%s callback failed (%s)", label, type(exc).__name__)
 
 
 def _is_timeout(exc: Exception) -> bool:
@@ -134,10 +137,6 @@ def _public_provider_error(stage: str, exc: Exception,
     if claim_index is not None:
         error["claim_index"] = claim_index
     return error
-
-# DeepInfra API (OpenAI-compatible)
-_deepinfra_client = None
-_tavily = None
 
 MODEL = "deepseek-ai/DeepSeek-V4-Flash"
 DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
@@ -382,32 +381,15 @@ VERIFY_RESPONSE_FORMAT = {
 
 
 # DeepInfra client (OpenAI-compatible)
-def _deepinfra_():
-    global _deepinfra_client
-    if _deepinfra_client is None:
-        from openai import OpenAI
-        _deepinfra_client = OpenAI(
-            api_key=os.getenv("DEEPINFRA_API_KEY"),
-            base_url=DEEPINFRA_BASE_URL,
-            timeout=DEEPINFRA_TIMEOUT_SECONDS,
-            # Retry here, where the whole-job budget can stop another attempt.
-            max_retries=0,
-        )
-    return _deepinfra_client
-
-def _tavily_():
-    global _tavily
-    if _tavily is None:
-        from tavily import TavilyClient
-        _tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
-    return _tavily
-
-
-def _read_chat_stream(stream, deadline: float | None) -> str:
+def _read_chat_stream(stream, deadline: float | None) -> tuple[str, object | None]:
     parts: list[str] = []
+    usage = None
     for event in stream:
         if deadline is not None:
             _remaining_seconds(deadline)
+        event_usage = getattr(event, "usage", None)
+        if event_usage is not None:
+            usage = event_usage
         choices = getattr(event, "choices", None)
         if not choices:
             continue
@@ -415,34 +397,63 @@ def _read_chat_stream(stream, deadline: float | None) -> str:
         content = getattr(delta, "content", None)
         if isinstance(content, str):
             parts.append(content)
-    return "".join(parts)
+    return "".join(parts), usage
 
 
 def _chat(system: str, user: str, max_tokens: int, *, deadline: float | None = None,
-          response_format: dict | None = None) -> str:
+          response_format: dict | None = None,
+          provider_context: ProviderContext | None = None,
+          stage: str = "unknown", claim_index: int | None = None) -> str:
+    providers = provider_context or ProviderContext.from_environment()
     for attempt in range(PROVIDER_MAX_RETRIES + 1):
         try:
-            request = {
-                "model": MODEL,
-                "max_tokens": max_tokens,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "temperature": 0,
-                "extra_body": {"reasoning_effort": DEEPINFRA_REASONING_EFFORT},
-                "stream": True,
-                "timeout": _bounded_timeout(DEEPINFRA_TIMEOUT_SECONDS, deadline),
-            }
-            if response_format is not None:
-                request["response_format"] = response_format
-            stream = _deepinfra_().chat.completions.create(**request)
-            with stream:
-                return _read_chat_stream(stream, deadline)
+            slot_timeout = (
+                _bounded_timeout(DEEPINFRA_TIMEOUT_SECONDS, deadline)
+                if providers.concurrency_limited
+                else None
+            )
+            with providers.deepinfra_slot(slot_timeout):
+                request = {
+                    "model": MODEL,
+                    "max_tokens": max_tokens,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    "temperature": 0,
+                    "extra_body": {"reasoning_effort": DEEPINFRA_REASONING_EFFORT},
+                    "stream": True,
+                    "timeout": _bounded_timeout(DEEPINFRA_TIMEOUT_SECONDS, deadline),
+                }
+                if response_format is not None:
+                    request["response_format"] = response_format
+                stream = providers.deepinfra_client(
+                    base_url=DEEPINFRA_BASE_URL,
+                    timeout=DEEPINFRA_TIMEOUT_SECONDS,
+                ).chat.completions.create(**request)
+                with stream:
+                    content, usage = _read_chat_stream(stream, deadline)
+            providers.usage.record_deepinfra(
+                model=MODEL,
+                stage=stage,
+                claim_index=claim_index,
+                attempt=attempt + 1,
+                usage=usage,
+                succeeded=True,
+            )
+            return content
         except Exception as exc:
+            providers.usage.record_deepinfra(
+                model=MODEL,
+                stage=stage,
+                claim_index=claim_index,
+                attempt=attempt + 1,
+                succeeded=False,
+            )
             logger.warning(
-                "DeepInfra attempt %d failed: %s: %s",
-                attempt + 1, type(exc).__name__, exc,
+                "DeepInfra attempt %d failed (%s)",
+                attempt + 1,
+                type(exc).__name__,
             )
             if (isinstance(exc, WholeJobDeadlineExceeded)
                     or attempt >= PROVIDER_MAX_RETRIES
@@ -553,23 +564,50 @@ def _filter_sources(results: list[dict]) -> list[dict]:
 def _score(r: dict) -> float:
     return r.get("score", 0)
 
-def _search(query: str, deadline: float | None = None) -> tuple[str, list[dict]]:
+def _search(
+    query: str,
+    deadline: float | None = None,
+    provider_context: ProviderContext | None = None,
+    claim_index: int | None = None,
+) -> tuple[str, list[dict]]:
     # Low-quality/UGC domains excluded at the Tavily, not filtered after the fact check.
+    providers = provider_context or ProviderContext.from_environment()
     for attempt in range(PROVIDER_MAX_RETRIES + 1):
         try:
-            response = _tavily_().search(
-                query,
-                max_results=10,
-                exclude_domains=list(_LOW_QUALITY),
+            slot_timeout = (
+                _bounded_timeout(TAVILY_TIMEOUT_SECONDS, deadline)
+                if providers.concurrency_limited
+                else None
+            )
+            with providers.tavily_slot(slot_timeout):
+                response = providers.tavily_client().search(
+                    query,
+                    max_results=10,
+                    exclude_domains=list(_LOW_QUALITY),
+                    search_depth="advanced",
+                    include_raw_content="markdown",
+                    timeout=_bounded_timeout(TAVILY_TIMEOUT_SECONDS, deadline),
+                )
+            providers.usage.record_tavily(
+                stage="search",
+                claim_index=claim_index,
+                attempt=attempt + 1,
+                succeeded=True,
                 search_depth="advanced",
-                include_raw_content="markdown",
-                timeout=_bounded_timeout(TAVILY_TIMEOUT_SECONDS, deadline),
             )
             break
         except Exception as exc:
+            providers.usage.record_tavily(
+                stage="search",
+                claim_index=claim_index,
+                attempt=attempt + 1,
+                succeeded=False,
+                search_depth="advanced",
+            )
             logger.warning(
-                "Tavily attempt %d failed: %s: %s",
-                attempt + 1, type(exc).__name__, exc,
+                "Tavily attempt %d failed (%s)",
+                attempt + 1,
+                type(exc).__name__,
             )
             if (isinstance(exc, WholeJobDeadlineExceeded)
                     or attempt >= PROVIDER_MAX_RETRIES
@@ -828,7 +866,9 @@ def _cap_confidence(confidence: int, *, independent_supports: int, has_contradic
 
 def _verify_one(claim: dict, search_text: str, sources: list[dict],
                  deadline: float | None = None,
-                 document_language: str | None = None) -> dict | None:
+                 document_language: str | None = None,
+                 provider_context: ProviderContext | None = None,
+                 claim_index: int | None = None) -> dict | None:
     # One verify call per claim: keeps each verdict paired with its own search results (no positional zip drift) and lets callers reveal results as they land.
     if not search_text:
         # No search evidence at all (search failed or returned zero usable sources). Do not
@@ -857,15 +897,14 @@ def _verify_one(claim: dict, search_text: str, sources: list[dict],
         max_tokens=1000,
         deadline=deadline,
         response_format=VERIFY_RESPONSE_FORMAT,
+        provider_context=provider_context,
+        stage="verification",
+        claim_index=claim_index,
     )
     raw_items, protocol_valid = _parse_provider_array(raw_reply)
     if not protocol_valid:
-        # Keep the malformed response in backend logs so protocol failures can be
-        # diagnosed without exposing provider details in the API response.
         logger.error(
-            "Verification protocol returned no JSON array or object for %r. "
-            "Raw response:\n%s",
-            claim["claim"][:60], raw_reply,
+            "Verification protocol returned no JSON array or object."
         )
         raise ProviderProtocolError("verification response was not a JSON array")
 
@@ -878,8 +917,8 @@ def _verify_one(claim: dict, search_text: str, sources: list[dict],
         if raw_items:
             logger.error(
                 "Verification protocol parsed %d object(s), but none had "
-                "supported/contradicted for %r. Raw response:\n%s",
-                len(raw_items), claim["claim"][:60], raw_reply,
+                "supported/contradicted.",
+                len(raw_items),
             )
             raise ProviderProtocolError("verification response omitted required fields")
         return None
@@ -981,9 +1020,11 @@ def fact_check(transcript: str, on_result=None, *, on_progress=None,
                on_claims=None, on_evidence=None, cancel_event=None,
                search_workers: int = SEARCH_WORKERS,
                verify_workers: int = VERIFY_WORKERS,
-               deadline: float | None = None) -> FactCheckResult:
+               deadline: float | None = None,
+               provider_context: ProviderContext | None = None) -> FactCheckResult:
     """Extract, search, and verify claims while retaining the legacy list interface."""
     errors: list[dict] = []
+    providers = provider_context or ProviderContext.from_environment()
     if deadline is None:
         deadline = time.monotonic() + WHOLE_JOB_DEADLINE_SECONDS
     deadline_reported = False
@@ -1005,7 +1046,13 @@ def fact_check(transcript: str, on_result=None, *, on_progress=None,
         errors.append(_public_provider_error("pipeline", WholeJobDeadlineExceeded()))
 
     def finish(status: str, values=(), claim_count: int = 0) -> FactCheckResult:
-        result = FactCheckResult(values, status=status, claim_count=claim_count, errors=errors)
+        result = FactCheckResult(
+            values,
+            status=status,
+            claim_count=claim_count,
+            errors=errors,
+            usage=providers.usage.snapshot(),
+        )
         progress("complete", status=status, claim_count=claim_count,
                  completed_count=len(result))
         return result
@@ -1029,9 +1076,11 @@ def fact_check(transcript: str, on_result=None, *, on_progress=None,
             max_tokens=4000,
             deadline=deadline,
             response_format=EXTRACT_RESPONSE_FORMAT,
+            provider_context=providers,
+            stage="extraction",
         )
     except Exception as exc:
-        logger.exception("Claim extraction failed")
+        logger.warning("Claim extraction failed (%s)", type(exc).__name__)
         errors.append(_public_provider_error("extraction", exc))
         if _is_rate_limited(exc):
             return finish("rate_limited")
@@ -1086,9 +1135,7 @@ def fact_check(transcript: str, on_result=None, *, on_progress=None,
 
     def record_error(stage: str, claim_index: int, exc: Exception) -> None:
         nonlocal failed_count, timeout_count, rate_limited_count
-        logger.warning(
-            "%s failed: %s: %s", stage.title(), type(exc).__name__, exc
-        )
+        logger.warning("%s failed (%s)", stage.title(), type(exc).__name__)
         errors.append(_public_provider_error(stage, exc, claim_index))
         if _is_rate_limited(exc):
             rate_limited_count += 1
@@ -1108,7 +1155,7 @@ def fact_check(transcript: str, on_result=None, *, on_progress=None,
             progress("searching", state="started", claim_index=claim_index,
                      claim_count=len(claims))
             future = search_pool.submit(
-                _search, claim["query"], deadline,
+                _search, claim["query"], deadline, providers, claim_index,
             )
             search_futures[future] = claim_index
             next_search += 1
@@ -1123,7 +1170,7 @@ def fact_check(transcript: str, on_result=None, *, on_progress=None,
                 return
             future = verify_pool.submit(
                 _verify_one, claims[claim_index], search_text, sources,
-                deadline, document_language,
+                deadline, document_language, providers, claim_index,
             )
             verify_futures[future] = claim_index
 
@@ -1285,13 +1332,21 @@ def fact_check(transcript: str, on_result=None, *, on_progress=None,
 
 def retry_claim(claim: dict, claim_index: int, *, evidence: dict | None = None,
                 on_progress=None, on_evidence=None, cancel_event=None,
-                deadline: float | None = None) -> FactCheckResult:
+                deadline: float | None = None,
+                provider_context: ProviderContext | None = None) -> FactCheckResult:
     """Retry one previously extracted claim without running extraction again."""
+    providers = provider_context or ProviderContext.from_environment()
     if deadline is None:
         deadline = time.monotonic() + CLAIM_RETRY_DEADLINE_SECONDS
 
     def finish(status: str, values=(), errors=()) -> FactCheckResult:
-        result = FactCheckResult(values, status=status, claim_count=1, errors=list(errors))
+        result = FactCheckResult(
+            values,
+            status=status,
+            claim_count=1,
+            errors=list(errors),
+            usage=providers.usage.snapshot(),
+        )
         _safe_callback(on_progress, {
             "stage": "complete",
             "status": status,
@@ -1325,7 +1380,10 @@ def retry_claim(claim: dict, claim_index: int, *, evidence: dict | None = None,
         }, "Progress")
         try:
             search_text, sources = _search(
-                claim["query"], deadline=deadline
+                claim["query"],
+                deadline=deadline,
+                provider_context=providers,
+                claim_index=claim_index,
             )
         except Exception as exc:
             return failed("search", exc)
@@ -1353,7 +1411,12 @@ def retry_claim(claim: dict, claim_index: int, *, evidence: dict | None = None,
     }, "Progress")
     try:
         verdict = _verify_one(
-            claim, search_text, sources, deadline=deadline,
+            claim,
+            search_text,
+            sources,
+            deadline=deadline,
+            provider_context=providers,
+            claim_index=claim_index,
         )
     except NoEvidenceError:
         return finish("no_evidence", errors=[{

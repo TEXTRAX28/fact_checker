@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import secrets
 import threading
 import time
@@ -10,6 +11,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import service
+from providers import (
+    ProviderConcurrencyGate,
+    ProviderContext,
+    ProviderCredentials,
+    merge_usage,
+)
 
 
 TERMINAL_STATUSES = {
@@ -73,6 +80,7 @@ class Job:
     client_id: str
     created_at: float
     history_limit: int
+    access_token_hash: bytes = field(repr=False)
     status: str = "queued"
     updated_at: float = 0.0
     progress: dict[str, Any] | None = None
@@ -83,6 +91,7 @@ class Job:
     evidence_by_claim: dict[int, dict[str, Any]] = field(default_factory=dict)
     retry_attempts: dict[int, int] = field(default_factory=dict)
     retrying_claim_index: int | None = None
+    usage: dict[str, Any] = field(default_factory=dict)
     sequence: int = 0
     cancel_event: threading.Event = field(default_factory=threading.Event)
     lock: threading.RLock = field(default_factory=threading.RLock)
@@ -109,6 +118,8 @@ class JobManager:
         ttl_seconds: float = 3600.0,
         history_limit: int = 256,
         claim_retry_limit: int = 2,
+        deepinfra_concurrency: int = 3,
+        tavily_concurrency: int = 4,
         clock: Callable[[], float] = time.time,
     ) -> None:
         if max_workers < 1 or capacity < 1 or history_limit < 1 or claim_retry_limit < 1:
@@ -122,6 +133,10 @@ class JobManager:
         self.ttl_seconds = ttl_seconds
         self.history_limit = history_limit
         self.claim_retry_limit = claim_retry_limit
+        self._provider_gate = ProviderConcurrencyGate(
+            deepinfra_limit=deepinfra_concurrency,
+            tavily_limit=tavily_concurrency,
+        )
         self._clock = clock
         self._lock = threading.RLock()
         self._jobs: dict[str, Job] = {}
@@ -132,7 +147,13 @@ class JobManager:
         self._closed = False
 
     def submit(
-        self, kind: str, payload: dict[str, Any], client_id: str
+        self,
+        kind: str,
+        payload: dict[str, Any],
+        client_id: str,
+        credentials: ProviderCredentials | None = None,
+        *,
+        rate_keys: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         now = self._clock()
         with self._lock:
@@ -147,30 +168,41 @@ class JobManager:
             outstanding = sum(not job.terminal() for job in self._jobs.values())
             if outstanding >= self.capacity:
                 raise CapacityError("The check queue is full.")
-            attempts = self._creation_times[client_id]
-            cutoff = now - self.rate_window_seconds
-            while attempts and attempts[0] <= cutoff:
-                attempts.popleft()
-            if len(attempts) >= self.rate_limit:
-                raise CreationRateLimitError("The check creation rate was exceeded.")
+            normalized_rate_keys = rate_keys or (client_id,)
+            self._check_rate_limits_locked(normalized_rate_keys, now)
 
+            access_token = secrets.token_urlsafe(32)
             job = Job(
                 id=secrets.token_urlsafe(24),
                 kind=kind,
                 client_id=client_id,
                 created_at=now,
                 history_limit=self.history_limit,
+                access_token_hash=self._token_hash(access_token),
             )
             self._jobs[job.id] = job
-            attempts.append(now)
+            self._record_rate_attempt_locked(normalized_rate_keys, now)
             self._append_event(job, "status", {"status": "queued"})
             try:
-                self._executor.submit(self._run, job, copy.deepcopy(payload))
+                self._executor.submit(
+                    self._run, job, copy.deepcopy(payload), credentials
+                )
             except Exception:
                 del self._jobs[job.id]
-                attempts.pop()
+                self._remove_rate_attempt_locked(normalized_rate_keys, now)
                 raise
-            return self._snapshot(job)
+            return {**self._snapshot(job), "job_token": access_token}
+
+    def authorize(self, job_id: str, access_token: str) -> bool:
+        if not isinstance(access_token, str) or not access_token:
+            return False
+        with self._lock:
+            self._purge_locked(self._clock())
+            job = self._jobs.get(job_id)
+        if job is None:
+            return False
+        supplied_hash = self._token_hash(access_token)
+        return secrets.compare_digest(supplied_hash, job.access_token_hash)
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -192,7 +224,15 @@ class JobManager:
                 self._append_event(job, "status", {"status": "cancelling"})
             return self._snapshot_locked(job)
 
-    def retry_claim(self, job_id: str, claim_index: int, client_id: str) -> dict[str, Any] | None:
+    def retry_claim(
+        self,
+        job_id: str,
+        claim_index: int,
+        client_id: str,
+        credentials: ProviderCredentials | None = None,
+        *,
+        rate_keys: tuple[str, ...] | None = None,
+    ) -> dict[str, Any] | None:
         now = self._clock()
         with self._lock:
             self._purge_locked(now)
@@ -210,12 +250,8 @@ class JobManager:
             if outstanding >= self.capacity:
                 raise CapacityError("The check queue is full.")
 
-            attempts = self._creation_times[client_id]
-            cutoff = now - self.rate_window_seconds
-            while attempts and attempts[0] <= cutoff:
-                attempts.popleft()
-            if len(attempts) >= self.rate_limit:
-                raise CreationRateLimitError("The check creation rate was exceeded.")
+            normalized_rate_keys = rate_keys or (client_id,)
+            self._check_rate_limits_locked(normalized_rate_keys, now)
 
             with job.condition:
                 if not job.terminal():
@@ -237,7 +273,7 @@ class JobManager:
                 if job.retry_attempts.get(claim_index, 0) >= self.claim_retry_limit:
                     raise ClaimRetryError("This claim has reached its retry limit.")
 
-                attempts.append(now)
+                self._record_rate_attempt_locked(normalized_rate_keys, now)
                 job.retry_attempts[claim_index] = job.retry_attempts.get(claim_index, 0) + 1
                 job.retrying_claim_index = claim_index
                 job.cancel_event.clear()
@@ -260,11 +296,12 @@ class JobManager:
                         job,
                         claim_index,
                         retry_error.get("stage") == "verification",
+                        credentials,
                     )
                 except Exception:
                     job.status = (job.outcome or {}).get("status", "partial")
                     job.retrying_claim_index = None
-                    attempts.pop()
+                    self._remove_rate_attempt_locked(normalized_rate_keys, now)
                     raise
                 return self._snapshot_locked(job)
 
@@ -299,7 +336,12 @@ class JobManager:
                         self._append_event(job, "status", {"status": "cancelling"})
         self._executor.shutdown(wait=wait, cancel_futures=False)
 
-    def _run(self, job: Job, payload: dict[str, Any]) -> None:
+    def _run(
+        self,
+        job: Job,
+        payload: dict[str, Any],
+        credentials: ProviderCredentials | None,
+    ) -> None:
         with job.condition:
             if not job.cancel_event.is_set():
                 job.status = "running"
@@ -362,6 +404,20 @@ class JobManager:
                 job.evidence_by_claim[claim_index] = copy.deepcopy(value)
                 job.updated_at = self._clock()
 
+        def on_usage(value: Any) -> None:
+            if not isinstance(value, dict):
+                return
+            with job.condition:
+                job.usage = copy.deepcopy(value)
+                job.updated_at = self._clock()
+                self._append_event(job, "usage", job.usage)
+
+        provider_context = ProviderContext(
+            credentials,
+            on_usage=on_usage,
+            concurrency_gate=self._provider_gate,
+        )
+
         try:
             if job.kind == "url":
                 outcome = service.check_url(
@@ -371,6 +427,7 @@ class JobManager:
                     on_claims=on_claims,
                     on_evidence=on_evidence,
                     cancel_event=job.cancel_event,
+                    provider_context=provider_context,
                 )
             else:
                 outcome = service.check_text(
@@ -381,6 +438,7 @@ class JobManager:
                     on_claims=on_claims,
                     on_evidence=on_evidence,
                     cancel_event=job.cancel_event,
+                    provider_context=provider_context,
                 )
             outcome_dict = outcome.to_dict()
             if not isinstance(outcome_dict, dict):
@@ -401,7 +459,10 @@ class JobManager:
                 "message": "Fact-check failed.",
                 "normalized_url": None,
                 "metadata": None,
+                "usage": provider_context.usage.snapshot(),
             }
+        finally:
+            provider_context.close()
 
         with job.condition:
             if job.cancel_event.is_set():
@@ -426,7 +487,12 @@ class JobManager:
                     ],
                 }
             job.status = status
+            outcome_usage = outcome_dict.get("usage")
+            if not isinstance(outcome_usage, dict) or not outcome_usage:
+                outcome_usage = provider_context.usage.snapshot()
+                outcome_dict["usage"] = copy.deepcopy(outcome_usage)
             job.outcome = copy.deepcopy(outcome_dict)
+            job.usage = copy.deepcopy(outcome_usage)
             if isinstance(outcome_dict.get("results"), list):
                 job.results = copy.deepcopy(outcome_dict["results"])
             job.updated_at = self._clock()
@@ -445,7 +511,13 @@ class JobManager:
                 {"status": status, "outcome": copy.deepcopy(outcome_dict)},
             )
 
-    def _run_claim_retry(self, job: Job, claim_index: int, reuse_evidence: bool) -> None:
+    def _run_claim_retry(
+        self,
+        job: Job,
+        claim_index: int,
+        reuse_evidence: bool,
+        credentials: ProviderCredentials | None,
+    ) -> None:
         def on_progress(value: Any) -> None:
             safe_value = copy.deepcopy(value) if isinstance(value, dict) else {"state": "updated"}
             safe_value["retry"] = True
@@ -464,6 +536,26 @@ class JobManager:
                 job.evidence_by_claim[claim_index] = copy.deepcopy(value)
                 job.updated_at = self._clock()
 
+        retry_usage: dict[str, Any] = {}
+
+        def on_usage(value: Any) -> None:
+            nonlocal retry_usage
+            if not isinstance(value, dict):
+                return
+            retry_usage = copy.deepcopy(value)
+            with job.condition:
+                job.usage = merge_usage(
+                    (job.outcome or {}).get("usage"), retry_usage
+                )
+                job.updated_at = self._clock()
+                self._append_event(job, "usage", job.usage)
+
+        provider_context = ProviderContext(
+            credentials,
+            on_usage=on_usage,
+            concurrency_gate=self._provider_gate,
+        )
+
         with job.condition:
             claim = copy.deepcopy(job.claims[claim_index])
             evidence = copy.deepcopy(job.evidence_by_claim.get(claim_index)) if reuse_evidence else None
@@ -476,6 +568,7 @@ class JobManager:
                 on_progress=on_progress,
                 on_evidence=on_evidence,
                 cancel_event=job.cancel_event,
+                provider_context=provider_context,
             ).to_dict()
         except Exception:
             outcome = {
@@ -487,7 +580,10 @@ class JobManager:
                     "message": "A provider request failed.",
                     "claim_index": claim_index,
                 }],
+                "usage": provider_context.usage.snapshot(),
             }
+        finally:
+            provider_context.close()
 
         with job.condition:
             previous = copy.deepcopy(job.outcome or {})
@@ -552,7 +648,11 @@ class JobManager:
                 "completed_count": completed_count,
                 "errors": copy.deepcopy(errors),
                 "message": message,
+                "usage": merge_usage(
+                    previous.get("usage"), outcome.get("usage")
+                ),
             }
+            job.usage = copy.deepcopy(job.outcome["usage"])
             job.updated_at = self._clock()
             verification_failed = any(
                 error.get("stage") == "verification" for error in retry_errors
@@ -602,6 +702,7 @@ class JobManager:
             "retrying_claim_index": job.retrying_claim_index,
             "retry_attempts": copy.deepcopy(job.retry_attempts),
             "claim_retry_limit": self.claim_retry_limit,
+            "usage": copy.deepcopy(job.usage),
         }
         if job.outcome is not None:
             snapshot["outcome"] = copy.deepcopy(job.outcome)
@@ -624,3 +725,32 @@ class JobManager:
                 empty.append(client_id)
         for client_id in empty:
             del self._creation_times[client_id]
+
+    def _check_rate_limits_locked(
+        self, rate_keys: tuple[str, ...], now: float
+    ) -> None:
+        cutoff = now - self.rate_window_seconds
+        for key in dict.fromkeys(rate_keys):
+            attempts = self._creation_times[key]
+            while attempts and attempts[0] <= cutoff:
+                attempts.popleft()
+            if len(attempts) >= self.rate_limit:
+                raise CreationRateLimitError("The check creation rate was exceeded.")
+
+    def _record_rate_attempt_locked(
+        self, rate_keys: tuple[str, ...], now: float
+    ) -> None:
+        for key in dict.fromkeys(rate_keys):
+            self._creation_times[key].append(now)
+
+    def _remove_rate_attempt_locked(
+        self, rate_keys: tuple[str, ...], now: float
+    ) -> None:
+        for key in dict.fromkeys(rate_keys):
+            attempts = self._creation_times.get(key)
+            if attempts and attempts[-1] == now:
+                attempts.pop()
+
+    @staticmethod
+    def _token_hash(access_token: str) -> bytes:
+        return hashlib.sha256(access_token.encode("utf-8")).digest()

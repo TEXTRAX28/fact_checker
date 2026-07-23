@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fact Check Privacy Policy</title>
+  <style>
+    :root { color-scheme: light; font: 16px/1.6 system-ui, sans-serif; color: #17202a; background: #f4f6f8; }
+    body { margin: 0; }
+    main { width: min(760px, calc(100% - 32px)); margin: 40px auto; background: #fff; border: 1px solid #d9e0e7; border-radius: 8px; padding: clamp(24px, 5vw, 48px); box-sizing: border-box; }
+    h1, h2 { line-height: 1.25; letter-spacing: 0; }
+    h1 { margin: 0 0 8px; font-size: 2rem; }
+    h2 { margin: 32px 0 8px; font-size: 1.15rem; }
+    p, ul { margin: 8px 0; }
+    .meta { color: #52606d; }
+    a { color: #075ea8; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Fact Check Privacy Policy</h1>
+    <p class="meta">Effective 23 July 2026</p>
+
+    <h2>What the extension processes</h2>
+    <p>Fact Check processes the page text, URL, or text you choose to check. It also processes the DeepInfra and Tavily API keys you provide.</p>
+
+    <h2>How data is used</h2>
+    <ul>
+      <li>Submitted content is sent to the Fact Check backend to run the check.</li>
+      <li>Claims and evidence are sent to DeepInfra for extraction and verification.</li>
+      <li>Search queries are sent to Tavily to find candidate evidence.</li>
+      <li>Your provider keys authorize those requests and charges remain on your provider accounts.</li>
+    </ul>
+
+    <h2>Storage and retention</h2>
+    <p>Provider keys are stored only in Chrome session storage and are sent again for each new check or retry. The backend does not write provider keys to a database, job snapshot, event, export, or application log. Active jobs and results are held in backend memory and normally expire one hour after completion. A backend restart removes them earlier.</p>
+    <p>The extension keeps a random installation identifier in Chrome local storage for rate limiting. It is not an account and is not used for advertising or cross-site tracking.</p>
+
+    <h2>Sharing</h2>
+    <p>Data is shared only with the hosting provider needed to operate the backend and with DeepInfra and Tavily as described above. Fact Check does not sell personal data and does not include advertising or analytics.</p>
+
+    <h2>Your choices</h2>
+    <p>You can clear provider keys from the extension settings at any time. Closing the browser clears Chrome session storage. Exports are created only when you request them.</p>
+
+    <h2>Security and limitations</h2>
+    <p>Hosted requests use HTTPS. No system can guarantee absolute security, and AI-generated verdicts can be wrong. Verify important claims against the cited sources.</p>
+
+    <h2>Contact</h2>
+    <p>Questions and deletion requests can be submitted through the <a href="/support">support page</a>.</p>
+  </main>
+</body>
+</html>

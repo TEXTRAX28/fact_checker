@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor as RealThreadPoolExecutor
 from types import SimpleNamespace
 
 import fact_checker
+from providers import ProviderContext, ProviderCredentials
 
 
 class FakeChatStream:
@@ -23,6 +24,15 @@ class FakeChatStream:
 
     def __exit__(self, *_args):
         self.closed = True
+
+
+def fake_provider_context(*, deepinfra=None, tavily=None):
+    context = ProviderContext(
+        ProviderCredentials.create("deepinfra-test-key", "tavily-test-key")
+    )
+    context._deepinfra_client = deepinfra
+    context._tavily_client = tavily
+    return context
 
 
 def extraction_payload(count):
@@ -544,12 +554,14 @@ def test_tavily_raw_content_is_preferred_and_evidence_is_bounded(monkeypatch):
                 },
             ]}
 
-    monkeypatch.setattr(fact_checker, "_tavily_", lambda: FakeTavily())
+    providers = fake_provider_context(tavily=FakeTavily())
 
     # _search() now returns structured source dicts, not bare URL strings - source_index
     # references in VERIFY_PROMPT's source_analysis rely on this list's order matching
     # the "[N] url" headers in the evidence text exactly.
-    text, sources = fact_checker._search("bounded evidence")
+    text, sources = fact_checker._search(
+        "bounded evidence", provider_context=providers
+    )
     blocks = text.split("\n\n")
 
     assert captured["include_raw_content"] == "markdown"
@@ -571,6 +583,7 @@ def test_tavily_raw_content_is_preferred_and_evidence_is_bounded(monkeypatch):
     # model-cited source_index maps back to the correct source unambiguously.
     for index, block in enumerate(blocks):
         assert block.startswith(f"[{index}] {sources[index]['url']}\n")
+    assert providers.usage.snapshot()["tavily"]["estimated_credits"] == 2
 
 
 def test_tavily_timeout_retries_are_bounded(monkeypatch):
@@ -584,10 +597,12 @@ def test_tavily_timeout_retries_are_bounded(monkeypatch):
                 raise TimeoutError("secret upstream timeout details")
             return {"results": []}
 
-    monkeypatch.setattr(fact_checker, "_tavily_", lambda: FakeTavily())
+    providers = fake_provider_context(tavily=FakeTavily())
     monkeypatch.setattr(fact_checker.time, "sleep", lambda _seconds: None)
 
-    assert fact_checker._search("retry query") == ("", [])
+    assert fact_checker._search(
+        "retry query", provider_context=providers
+    ) == ("", [])
     assert attempts == fact_checker.PROVIDER_MAX_RETRIES + 1
 
 
@@ -598,11 +613,13 @@ def test_deepinfra_chat_has_an_explicit_request_timeout(monkeypatch):
         create=lambda **kwargs: captured.update(kwargs) or response
     )
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    monkeypatch.setattr(fact_checker, "_deepinfra_", lambda: client)
+    providers = fake_provider_context(deepinfra=client)
 
     response_format = {"type": "json_object"}
     assert fact_checker._chat(
-        "system", "user", 12, response_format=response_format
+        "system", "user", 12,
+        response_format=response_format,
+        provider_context=providers,
     ) == "[]"
     assert captured["timeout"] == fact_checker.DEEPINFRA_TIMEOUT_SECONDS
     assert captured["temperature"] == 0
@@ -612,6 +629,42 @@ def test_deepinfra_chat_has_an_explicit_request_timeout(monkeypatch):
     assert response.closed is True
 
 
+def test_deepinfra_stream_usage_is_recorded_by_stage_and_claim():
+    class UsageStream(FakeChatStream):
+        def __iter__(self):
+            events = list(super().__iter__())
+            events.append(SimpleNamespace(
+                choices=[],
+                usage=SimpleNamespace(
+                    prompt_tokens=40,
+                    completion_tokens=8,
+                    total_tokens=48,
+                ),
+            ))
+            return iter(events)
+
+    response = UsageStream("[]")
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+        create=lambda **_kwargs: response,
+    )))
+    providers = fake_provider_context(deepinfra=client)
+
+    fact_checker._chat(
+        "system",
+        "user",
+        12,
+        provider_context=providers,
+        stage="verification",
+        claim_index=3,
+    )
+
+    usage = providers.usage.snapshot()
+    assert usage["deepinfra"]["total_tokens"] == 48
+    assert usage["deepinfra"]["events"][0]["stage"] == "verification"
+    assert usage["deepinfra"]["events"][0]["claim_index"] == 3
+    assert usage["complete"] is True
+
+
 def test_deepinfra_timeout_uses_only_the_remaining_job_budget(monkeypatch):
     captured = {}
     response = FakeChatStream("[]")
@@ -619,10 +672,12 @@ def test_deepinfra_timeout_uses_only_the_remaining_job_budget(monkeypatch):
         create=lambda **kwargs: captured.update(kwargs) or response
     )
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    monkeypatch.setattr(fact_checker, "_deepinfra_", lambda: client)
+    providers = fake_provider_context(deepinfra=client)
 
     deadline = time.monotonic() + 5
-    assert fact_checker._chat("system", "user", 12, deadline=deadline) == "[]"
+    assert fact_checker._chat(
+        "system", "user", 12, deadline=deadline, provider_context=providers
+    ) == "[]"
     assert 0 < captured["timeout"] <= 5
 
 
@@ -640,11 +695,15 @@ def test_deepinfra_stream_closes_when_job_deadline_expires(monkeypatch):
             return 5.0
         raise fact_checker.WholeJobDeadlineExceeded()
 
-    monkeypatch.setattr(fact_checker, "_deepinfra_", lambda: client)
+    providers = fake_provider_context(deepinfra=client)
     monkeypatch.setattr(fact_checker, "_remaining_seconds", remaining)
 
     try:
-        fact_checker._chat("system", "user", 12, deadline=time.monotonic() + 5)
+        fact_checker._chat(
+            "system", "user", 12,
+            deadline=time.monotonic() + 5,
+            provider_context=providers,
+        )
     except fact_checker.WholeJobDeadlineExceeded:
         pass
     else:
@@ -665,11 +724,13 @@ def test_deepinfra_does_not_retry_after_whole_job_deadline(monkeypatch):
     client = SimpleNamespace(
         chat=SimpleNamespace(completions=SimpleNamespace(create=fail))
     )
-    monkeypatch.setattr(fact_checker, "_deepinfra_", lambda: client)
+    providers = fake_provider_context(deepinfra=client)
 
     try:
         fact_checker._chat(
-            "system", "user", 12, deadline=time.monotonic() + 0.02
+            "system", "user", 12,
+            deadline=time.monotonic() + 0.02,
+            provider_context=providers,
         )
     except fact_checker.WholeJobDeadlineExceeded:
         pass

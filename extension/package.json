@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "check": "node scripts/validate.mjs"
+    "check": "node scripts/validate.mjs",
+    "configure:backend": "node scripts/configure-backend.mjs"
   }
 }

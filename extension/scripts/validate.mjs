@@ -5,11 +5,22 @@ import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
 const manifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8"));
+const config = readFileSync(join(root, "config.js"), "utf8");
+const apiMatch = config.match(/API_BASE_URL\s*=\s*"([^"]+)"/);
+assert.ok(apiMatch, "config.js must define API_BASE_URL as a string literal");
+const apiUrl = new URL(apiMatch[1]);
+assert.equal(apiUrl.pathname, "/", "API_BASE_URL must not contain a path");
+const localBackend = apiUrl.protocol === "http:"
+  && ["localhost", "127.0.0.1"].includes(apiUrl.hostname);
+assert.ok(localBackend || apiUrl.protocol === "https:", "Hosted API_BASE_URL must use HTTPS");
+const expectedHostPermissions = localBackend
+  ? ["http://localhost/*", "http://127.0.0.1/*"]
+  : [`${apiUrl.origin}/*`];
 
 assert.equal(manifest.manifest_version, 3);
 assert.equal(manifest.minimum_chrome_version, "116");
 assert.deepEqual(manifest.permissions, ["activeTab", "scripting", "sidePanel", "storage"]);
-assert.deepEqual(manifest.host_permissions, ["http://localhost/*", "http://127.0.0.1/*"]);
+assert.deepEqual(manifest.host_permissions, expectedHostPermissions);
 assert.deepEqual(manifest.optional_host_permissions, ["http://*/*", "https://*/*"]);
 assert.equal(manifest.side_panel.default_path, "sidepanel.html");
 assert.equal(manifest.background.service_worker, "service-worker.js");
@@ -53,7 +64,9 @@ const scripts = walk(root).filter((file) => /\.(?:js|mjs)$/.test(file));
 for (const script of scripts) execFileSync(process.execPath, ["--check", script], { stdio: "pipe" });
 
 const runtimeScripts = scripts.filter((file) => !file.includes(`${join(root, "tests")}\\`) && !file.includes(`${join(root, "scripts")}\\`));
-const apiLiteralFiles = runtimeScripts.filter((file) => readFileSync(file, "utf8").includes("127.0.0.1:8000"));
+const apiLiteralFiles = runtimeScripts.filter((file) => (
+  readFileSync(file, "utf8").includes(apiUrl.origin)
+));
 assert.deepEqual(apiLiteralFiles, [join(root, "config.js")], "API base URL must exist only in config.js");
 
 for (const size of [16, 48, 128]) {
@@ -63,7 +76,7 @@ for (const size of [16, 48, 128]) {
   assert.equal(png.readUInt32BE(20), size, `icon${size}.png has the wrong height`);
 }
 
-console.log(`Validated manifest, ${scripts.length} scripts, local assets, API config, and PNG dimensions.`);
+console.log(`Validated manifest, ${scripts.length} scripts, assets, ${apiUrl.origin}, and PNG dimensions.`);
 
 function walk(directory) {
   return readdirSync(directory).flatMap((name) => {

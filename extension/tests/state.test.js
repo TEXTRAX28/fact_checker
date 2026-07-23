@@ -127,6 +127,33 @@ test("mergeEvent handles a result event - data IS the verdict, not nested", () =
   assert.equal(merged.claimProgress[0], "complete");
 });
 
+test("mergeEvent replaces provider usage totals without double counting replay", () => {
+  const current = normalizeSnapshot({ id: "check-usage", status: "running", sequence: 4 });
+  const data = {
+    sequence: 5,
+    deepinfra: {
+      requests: 2,
+      successful_requests: 2,
+      input_tokens: 120,
+      output_tokens: 30,
+      total_tokens: 150,
+      complete: true,
+    },
+    tavily: {
+      search_attempts: 3,
+      successful_searches: 3,
+      estimated_credits: 6,
+      complete: true,
+    },
+    complete: true,
+  };
+  const merged = mergeEvent(current, data, "usage");
+  const replayed = mergeEvent(merged, data, "usage");
+  assert.equal(replayed.usage.deepinfra.totalTokens, 150);
+  assert.equal(replayed.usage.tavily.estimatedCredits, 6);
+  assert.equal(replayed.usage.complete, true);
+});
+
 test("claimProgressCopy clearly marks unfinished claims as unverified", () => {
   assert.deepEqual(claimProgressCopy("waiting"), [
     "DETECTED", "Not verified yet. Waiting for source search.",
@@ -260,11 +287,13 @@ test("compactSession preserves recovery fields without source input text", () =>
     checkId: "check-3",
     snapshotPath: "/v1/checks/check-3",
     eventsPath: "/v1/checks/check-3/events",
+    jobToken: "job-access-token",
     mode: "text",
     context: { title: "Pasted text" },
   });
   assert.equal(compact.sequence, 9);
   assert.equal(compact.claimCount, 4);
+  assert.equal(compact.jobToken, "job-access-token");
   assert.equal("text" in compact, false);
 });
 
@@ -335,6 +364,41 @@ test("buildExportData shapes a completed snapshot for export", () => {
   assert.equal(data.claims[0].verdict, "TRUE");
   assert.equal(data.claims[0].sources[0].url, "https://en.wikipedia.org/wiki/Eiffel_Tower");
   assert.equal(typeof data.exportedAt, "string");
+});
+
+test("exports include usage totals but never capabilities or provider keys", () => {
+  const snapshot = normalizeSnapshot({
+    id: "check-secret-export",
+    status: "completed",
+    results: [],
+    job_token: "private-job-token",
+    deepinfraKey: "private-deepinfra-key",
+    tavilyKey: "private-tavily-key",
+    usage: {
+      deepinfra: {
+        input_tokens: 80,
+        output_tokens: 20,
+        total_tokens: 100,
+        complete: true,
+      },
+      tavily: {
+        search_attempts: 2,
+        successful_searches: 2,
+        estimated_credits: 4,
+        complete: true,
+      },
+      complete: true,
+    },
+  });
+
+  const serialized = JSON.stringify(
+    buildExportData(snapshot, { mode: "text", title: "Pasted text" }),
+  );
+  assert.match(serialized, /"totalTokens":100/);
+  assert.match(serialized, /"estimatedCredits":4/);
+  assert.doesNotMatch(serialized, /private-job-token/);
+  assert.doesNotMatch(serialized, /private-deepinfra-key/);
+  assert.doesNotMatch(serialized, /private-tavily-key/);
 });
 
 test("buildExportData includes failed and unfinished claim slots", () => {

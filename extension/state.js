@@ -55,6 +55,55 @@ function asNumber(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function normalizeUsage(value = {}, previous = {}) {
+  const deepinfra = value?.deepinfra || {};
+  const tavily = value?.tavily || {};
+  const previousDeepinfra = previous?.deepinfra || {};
+  const previousTavily = previous?.tavily || {};
+  return {
+    deepinfra: {
+      requests: Math.max(0, asNumber(firstDefined(
+        deepinfra.requests, previousDeepinfra.requests, 0,
+      ))),
+      successfulRequests: Math.max(0, asNumber(firstDefined(
+        deepinfra.successful_requests,
+        deepinfra.successfulRequests,
+        previousDeepinfra.successfulRequests,
+        0,
+      ))),
+      inputTokens: Math.max(0, asNumber(firstDefined(
+        deepinfra.input_tokens, deepinfra.inputTokens, previousDeepinfra.inputTokens, 0,
+      ))),
+      outputTokens: Math.max(0, asNumber(firstDefined(
+        deepinfra.output_tokens, deepinfra.outputTokens, previousDeepinfra.outputTokens, 0,
+      ))),
+      totalTokens: Math.max(0, asNumber(firstDefined(
+        deepinfra.total_tokens, deepinfra.totalTokens, previousDeepinfra.totalTokens, 0,
+      ))),
+      complete: Boolean(firstDefined(deepinfra.complete, previousDeepinfra.complete, true)),
+    },
+    tavily: {
+      searchAttempts: Math.max(0, asNumber(firstDefined(
+        tavily.search_attempts, tavily.searchAttempts, previousTavily.searchAttempts, 0,
+      ))),
+      successfulSearches: Math.max(0, asNumber(firstDefined(
+        tavily.successful_searches,
+        tavily.successfulSearches,
+        previousTavily.successfulSearches,
+        0,
+      ))),
+      estimatedCredits: Math.max(0, asNumber(firstDefined(
+        tavily.estimated_credits,
+        tavily.estimatedCredits,
+        previousTavily.estimatedCredits,
+        0,
+      ))),
+      complete: Boolean(firstDefined(tavily.complete, previousTavily.complete, true)),
+    },
+    complete: Boolean(firstDefined(value?.complete, previous?.complete, true)),
+  };
+}
+
 function normalizeState(value, fallback = "idle") {
   const state = String(value || fallback).toLowerCase().replaceAll("-", "_");
   return STATE_ALIASES[state] || state;
@@ -234,6 +283,10 @@ export function normalizeSnapshot(raw = {}, previous = {}) {
     claimRetryLimit: Math.max(1, asNumber(firstDefined(
       raw.claim_retry_limit, raw.claimRetryLimit, previous.claimRetryLimit, 2,
     ), 2)),
+    usage: normalizeUsage(
+      firstDefined(raw.usage, raw.outcome?.usage, previous.usage, {}),
+      previous.usage || {},
+    ),
     cached: Boolean(firstDefined(raw.cached, raw.cache_hit, previous.cached, false)),
     startedAt: firstDefined(raw.started_at, raw.startedAt, previous.startedAt, null),
     completedAt: firstDefined(raw.completed_at, raw.completedAt, previous.completedAt, null),
@@ -311,6 +364,11 @@ export function mergeEvent(snapshot, data = {}, eventType = "") {
     return normalizeSnapshot(next, current);
   }
 
+  if (eventType === "usage") {
+    next.usage = normalizeUsage(data, current.usage);
+    return normalizeSnapshot(next, current);
+  }
+
   if (eventType === "terminal") {
     const outcome = data.outcome && typeof data.outcome === "object" ? data.outcome : {};
     return normalizeSnapshot({
@@ -319,6 +377,7 @@ export function mergeEvent(snapshot, data = {}, eventType = "") {
       results: outcome.results,
       errors: outcome.errors,
       claim_count: outcome.claim_count,
+      usage: outcome.usage,
       retrying_claim_index: null,
     }, current);
   }
@@ -370,6 +429,7 @@ export function compactSession(snapshot, job) {
     checkId: snapshot?.checkId || job.checkId,
     snapshotPath: job?.snapshotPath || null,
     eventsPath: job?.eventsPath || null,
+    jobToken: job?.jobToken || null,
     mode: job?.mode || "page",
     context: job?.context || null,
     state: snapshot?.state || "queued",
@@ -385,6 +445,7 @@ export function compactSession(snapshot, job) {
     retryingClaimIndex: snapshot?.retryingClaimIndex ?? null,
     retryAttempts: snapshot?.retryAttempts || {},
     claimRetryLimit: snapshot?.claimRetryLimit || 2,
+    usage: snapshot?.usage || normalizeUsage(),
     cached: Boolean(snapshot?.cached),
   };
 }
@@ -456,6 +517,7 @@ export function buildExportData(snapshot, source = {}) {
       completedCount: results.length,
       failedCount: claims.filter((claim) => claim.status === "failed").length,
       incompleteCount: claims.filter((claim) => claim.status === "incomplete").length,
+      usage: normalizeUsage(snapshot?.usage),
     },
     errors: [
       ...(snapshot?.errors || []).map((message) => ({ message })),
@@ -476,6 +538,8 @@ export function toMarkdownReport(data) {
   if (data.source.url) lines.push(`**URL:** ${data.source.url}`);
   lines.push(`**Exported:** ${data.exportedAt}`);
   lines.push(`**Claims checked:** ${data.summary.completedCount} of ${data.summary.claimCount}`);
+  lines.push(`**DeepInfra tokens:** ${data.summary.usage.deepinfra.totalTokens}`);
+  lines.push(`**Tavily estimated credits:** ${data.summary.usage.tavily.estimatedCredits}`);
   lines.push("");
 
   data.claims.forEach((claim, position) => {

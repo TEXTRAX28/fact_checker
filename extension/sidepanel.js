@@ -1,12 +1,13 @@
 import {
   ApiError,
-  apiUrl,
   buildCheckPayload,
   cancelCheck,
   createCheck,
   getCheckSnapshot,
   getHealth,
+  normalizeProviderCredentials,
   retryCheckClaim,
+  streamCheckEvents,
 } from "./api.js";
 import { CLIENT_LIMITS } from "./config.js";
 import { createIcon, hydrateIcons } from "./icons.js";
@@ -30,19 +31,20 @@ const STORAGE = Object.freeze({
   activeJob: "fc:activeJob",
   activeTabId: "fc:activeTabId",
   drafts: "fc:drafts",
+  credentials: "fc:providerCredentials",
+  installId: "fc:installId",
 });
-// Must match jobs.py::JobManager._append_event's actual event names exactly - a
-// browser EventSource only delivers a named event to a listener registered for
-// that exact name (it does not fall through to the generic "message" handler).
-// This list previously named stage-specific events (queued/verifying/etc.) from
-// an earlier draft of the event vocabulary; the real backend only ever sends
-// these envelope names, so every SSE event was silently unhandled until
-// this was fixed - confirmed live, this wasn't a guess.
-const SSE_EVENTS = ["status", "claims", "progress", "result", "terminal"];
-
 const elements = {
   backend: document.querySelector("#backend-status"),
   backendLabel: document.querySelector(".backend-label"),
+  credentialsAction: document.querySelector("#credentials-action"),
+  credentialsDialog: document.querySelector("#credentials-dialog"),
+  credentialsForm: document.querySelector("#credentials-form"),
+  credentialsClose: document.querySelector("#credentials-close"),
+  credentialsClear: document.querySelector("#credentials-clear"),
+  credentialsError: document.querySelector("#credentials-error"),
+  deepinfraKey: document.querySelector("#deepinfra-key"),
+  tavilyKey: document.querySelector("#tavily-key"),
   modeControl: document.querySelector("#mode-control"),
   inputPanel: document.querySelector("#input-panel"),
   inputError: document.querySelector("#input-error"),
@@ -56,6 +58,12 @@ const elements = {
   statusDetail: document.querySelector("#status-detail"),
   stageList: document.querySelector("#stage-list"),
   jobErrors: document.querySelector("#job-errors"),
+  usageSection: document.querySelector("#usage-section"),
+  usageStatus: document.querySelector("#usage-status"),
+  usageInputTokens: document.querySelector("#usage-input-tokens"),
+  usageOutputTokens: document.querySelector("#usage-output-tokens"),
+  usageTotalTokens: document.querySelector("#usage-total-tokens"),
+  usageTavilyCredits: document.querySelector("#usage-tavily-credits"),
   resultsSection: document.querySelector("#results-section"),
   resultsCount: document.querySelector("#results-count"),
   resultsContext: document.querySelector("#results-context"),
@@ -67,12 +75,15 @@ const elements = {
 const app = {
   mode: "page",
   drafts: { url: "", text: "" },
+  credentials: { deepinfraKey: "", tavilyKey: "" },
+  installId: "",
   page: null,
   activeTabId: null,
   backend: "checking",
   snapshot: normalizeSnapshot({ state: "idle" }),
   job: null,
-  eventSource: null,
+  eventController: null,
+  reconnectTimer: null,
   pollTimer: null,
   snapshotTimer: null,
   refreshInFlight: null,
@@ -90,10 +101,18 @@ async function initialize() {
     STORAGE.activeJob,
     STORAGE.activeTabId,
     STORAGE.drafts,
+    STORAGE.credentials,
   ]);
+  const local = await chrome.storage.local.get(STORAGE.installId);
 
   app.activeTabId = saved[STORAGE.activeTabId] ?? null;
   app.drafts = { ...app.drafts, ...(saved[STORAGE.drafts] || {}) };
+  app.credentials = { ...app.credentials, ...(saved[STORAGE.credentials] || {}) };
+  app.installId = String(local[STORAGE.installId] || "");
+  if (!app.installId) {
+    app.installId = crypto.randomUUID();
+    await chrome.storage.local.set({ [STORAGE.installId]: app.installId });
+  }
 
   const savedJob = saved[STORAGE.activeJob];
   if (savedJob?.checkId) {
@@ -102,6 +121,7 @@ async function initialize() {
       checkId: savedJob.checkId,
       snapshotPath: savedJob.snapshotPath,
       eventsPath: savedJob.eventsPath,
+      jobToken: savedJob.jobToken,
       mode: savedJob.mode,
       context: savedJob.context,
     };
@@ -148,6 +168,16 @@ function bindEvents() {
   });
 
   elements.backend.addEventListener("click", () => void checkBackend());
+  elements.credentialsAction.addEventListener("click", openCredentialsDialog);
+  elements.credentialsClose.addEventListener("click", () => elements.credentialsDialog.close());
+  elements.credentialsForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void saveCredentials();
+  });
+  elements.credentialsClear.addEventListener("click", () => void clearCredentials());
+  elements.credentialsDialog.addEventListener("cancel", () => {
+    elements.credentialsError.hidden = true;
+  });
 
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.tabId === app.activeTabId && message.type?.startsWith("PAGE_CAPTURE")) {
@@ -179,6 +209,49 @@ function bindEvents() {
 
   window.addEventListener("pagehide", stopTransport);
   setInterval(() => void checkBackend({ quiet: true }), 30_000);
+}
+
+function hasProviderCredentials() {
+  try {
+    normalizeProviderCredentials(app.credentials);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function openCredentialsDialog() {
+  elements.deepinfraKey.value = app.credentials.deepinfraKey || "";
+  elements.tavilyKey.value = app.credentials.tavilyKey || "";
+  elements.credentialsError.hidden = true;
+  elements.credentialsDialog.showModal();
+  elements.deepinfraKey.focus();
+}
+
+async function saveCredentials() {
+  try {
+    app.credentials = normalizeProviderCredentials({
+      deepinfraKey: elements.deepinfraKey.value,
+      tavilyKey: elements.tavilyKey.value,
+    });
+    await chrome.storage.session.set({ [STORAGE.credentials]: app.credentials });
+    elements.credentialsError.hidden = true;
+    elements.credentialsDialog.close();
+    app.inputMessage = "";
+    render();
+  } catch (error) {
+    elements.credentialsError.textContent = error?.message || "Enter valid provider keys.";
+    elements.credentialsError.hidden = false;
+  }
+}
+
+async function clearCredentials() {
+  app.credentials = { deepinfraKey: "", tavilyKey: "" };
+  elements.deepinfraKey.value = "";
+  elements.tavilyKey.value = "";
+  await chrome.storage.session.remove(STORAGE.credentials);
+  elements.credentialsDialog.close();
+  render();
 }
 
 async function requestPageRefresh() {
@@ -338,6 +411,7 @@ function render() {
   renderAction();
   renderBackend();
   renderProgress();
+  renderUsage();
   renderResults();
 }
 
@@ -367,9 +441,18 @@ function renderAction() {
   }
 
   elements.primary.dataset.action = action;
+  elements.primary.title = !running && !hasProviderCredentials()
+    ? "Add your DeepInfra and Tavily API keys first."
+    : "";
   elements.primaryLabel.textContent = label;
   elements.primaryIcon.replaceChildren(createIcon(iconName, 18));
-  elements.primary.disabled = cancelling || (!running && (app.backend !== "online" || !hasUsableInput()));
+  elements.primary.disabled = cancelling || (
+    !running && (
+      app.backend !== "online"
+      || !hasUsableInput()
+      || !hasProviderCredentials()
+    )
+  );
 
   for (const button of elements.modeControl.querySelectorAll("[data-mode]")) {
     button.disabled = running;
@@ -381,6 +464,27 @@ function renderBackend() {
   elements.backend.dataset.status = app.backend;
   elements.backendLabel.textContent = labels[app.backend] || "Unknown";
   elements.backend.setAttribute("aria-label", `Backend ${labels[app.backend] || "unknown"}. Activate to retry.`);
+  const credentialsReady = hasProviderCredentials();
+  elements.credentialsAction.dataset.status = credentialsReady ? "ready" : "missing";
+  elements.credentialsAction.setAttribute(
+    "aria-label",
+    credentialsReady ? "Provider API keys configured" : "Provider API keys required",
+  );
+}
+
+function renderUsage() {
+  const usage = app.snapshot.usage;
+  const deepinfra = usage?.deepinfra || {};
+  const tavily = usage?.tavily || {};
+  const hasUsage = Number(deepinfra.requests || 0) > 0
+    || Number(tavily.searchAttempts || 0) > 0;
+  elements.usageSection.hidden = !app.job || !hasUsage;
+  if (elements.usageSection.hidden) return;
+  elements.usageInputTokens.textContent = Number(deepinfra.inputTokens || 0).toLocaleString();
+  elements.usageOutputTokens.textContent = Number(deepinfra.outputTokens || 0).toLocaleString();
+  elements.usageTotalTokens.textContent = Number(deepinfra.totalTokens || 0).toLocaleString();
+  elements.usageTavilyCredits.textContent = Number(tavily.estimatedCredits || 0).toLocaleString();
+  elements.usageStatus.textContent = usage.complete ? "Reported" : "Partial";
 }
 
 function renderProgress() {
@@ -615,6 +719,7 @@ async function startCheck(forceRefresh) {
   renderInputMessage();
 
   try {
+    const credentials = normalizeProviderCredentials(app.credentials);
     const payload = buildCheckPayload({
       mode: app.mode,
       page: app.page,
@@ -622,17 +727,20 @@ async function startCheck(forceRefresh) {
       text: app.drafts.text,
       forceRefresh,
     });
-    const response = await createCheck(payload);
+    const response = await createCheck(payload, credentials, app.installId);
     // The backend's job snapshot field is `id`, not `check_id` (jobs.py's
     // JobManager._snapshot_locked), and it doesn't return snapshot_url/events_url
     // convenience fields - the client constructs those paths itself from `id`.
-    if (!response?.id) throw new ApiError("The backend did not return a check ID.");
+    if (!response?.id || !response?.job_token) {
+      throw new ApiError("The backend did not return secure check access.");
+    }
 
     stopTransport();
     app.job = {
       checkId: response.id,
       snapshotPath: `/v1/checks/${encodeURIComponent(response.id)}`,
       eventsPath: `/v1/checks/${encodeURIComponent(response.id)}/events`,
+      jobToken: response.job_token,
       mode: app.mode,
       context: submissionContext(),
     };
@@ -657,7 +765,7 @@ async function requestCancellation() {
   app.cancelPending = true;
   renderAction();
   try {
-    await cancelCheck(app.job.checkId);
+    await cancelCheck(app.job.checkId, app.job.jobToken, app.installId);
     await refreshSnapshot();
   } catch (error) {
     if (isJobNotFound(error)) {
@@ -676,7 +784,14 @@ async function retryFailedClaim(claimIndex, status) {
   if (!app.job || isRunning()) return;
   status.textContent = "Starting retry...";
   try {
-    const raw = await retryCheckClaim(app.job.checkId, claimIndex);
+    const credentials = normalizeProviderCredentials(app.credentials);
+    const raw = await retryCheckClaim(
+      app.job.checkId,
+      claimIndex,
+      app.job.jobToken,
+      credentials,
+      app.installId,
+    );
     if (!snapshotBelongsToJob(raw, app.job.checkId)) {
       throw new ApiError("The backend returned an unexpected retry response.");
     }
@@ -697,23 +812,32 @@ function connectTransport() {
   stopTransport();
   schedulePolling(10_000);
 
-  try {
-    app.eventSource = new EventSource(apiUrl(app.job.eventsPath));
-    app.eventSource.addEventListener("open", () => {
-      setBackend("online");
-      schedulePolling(10_000);
-      void refreshSnapshot();
-    });
-    app.eventSource.addEventListener("error", () => {
+  const job = { ...app.job };
+  const controller = new AbortController();
+  app.eventController = controller;
+  setBackend("online");
+  void streamCheckEvents({
+    eventsPath: job.eventsPath,
+    jobToken: job.jobToken,
+    clientId: app.installId,
+    lastEventId: app.snapshot.sequence,
+    signal: controller.signal,
+    onEvent: handleServerEvent,
+  }).then(() => {
+    if (app.eventController !== controller || isTerminalState(app.snapshot.state)) return;
+    app.eventController = null;
+    app.reconnectTimer = setTimeout(connectTransport, 1_500);
+  }).catch((error) => {
+    if (controller.signal.aborted || app.eventController !== controller) return;
+    app.eventController = null;
+    if (isJobNotFound(error)) {
+      void resetActiveJob().then(render);
+    } else {
       setBackend("recovering");
       schedulePolling(2_500);
-    });
-    app.eventSource.addEventListener("message", handleServerEvent);
-    for (const type of SSE_EVENTS) app.eventSource.addEventListener(type, handleServerEvent);
-  } catch {
-    app.eventSource = null;
-    schedulePolling(2_500);
-  }
+      app.reconnectTimer = setTimeout(connectTransport, 2_500);
+    }
+  });
 }
 
 function handleServerEvent(event) {
@@ -738,10 +862,16 @@ async function refreshSnapshot() {
   const requestedJob = {
     checkId: app.job.checkId,
     snapshotPath: app.job.snapshotPath,
+    jobToken: app.job.jobToken,
   };
   app.refreshInFlight = requestedJob.checkId;
   try {
-    const raw = await getCheckSnapshot(requestedJob.checkId, requestedJob.snapshotPath);
+    const raw = await getCheckSnapshot(
+      requestedJob.checkId,
+      requestedJob.snapshotPath,
+      requestedJob.jobToken,
+      app.installId,
+    );
     if (app.job?.checkId !== requestedJob.checkId
         || !snapshotBelongsToJob(raw, requestedJob.checkId)
         || snapshotIsStale(raw, app.snapshot)) return;
@@ -785,8 +915,10 @@ function schedulePolling(interval) {
 }
 
 function stopTransport() {
-  app.eventSource?.close();
-  app.eventSource = null;
+  app.eventController?.abort();
+  app.eventController = null;
+  clearTimeout(app.reconnectTimer);
+  app.reconnectTimer = null;
   clearInterval(app.pollTimer);
   app.pollTimer = null;
   clearTimeout(app.snapshotTimer);

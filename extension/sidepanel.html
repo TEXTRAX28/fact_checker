@@ -13,10 +13,16 @@
         <span class="brand-mark" data-icon="shield-check" data-icon-size="20"></span>
         <span>Fact Check</span>
       </div>
-      <button id="backend-status" class="backend-status" type="button" title="Check backend connection">
-        <span class="status-dot" aria-hidden="true"></span>
-        <span class="backend-label">Connecting</span>
-      </button>
+      <div class="header-actions">
+        <button id="credentials-action" class="icon-action" type="button" title="Provider API keys" aria-label="Provider API keys">
+          <span data-icon="key-round" data-icon-size="17"></span>
+          <span class="credential-dot" aria-hidden="true"></span>
+        </button>
+        <button id="backend-status" class="backend-status" type="button" title="Check backend connection">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span class="backend-label">Connecting</span>
+        </button>
+      </div>
     </header>
 
     <main>
@@ -59,6 +65,19 @@
         <div id="job-errors" class="job-errors" hidden></div>
       </section>
 
+      <section id="usage-section" class="usage-section" aria-labelledby="usage-heading" hidden>
+        <div class="section-heading-row">
+          <h2 id="usage-heading" class="section-title">Provider usage</h2>
+          <span id="usage-status" class="count-label"></span>
+        </div>
+        <dl class="usage-grid">
+          <div><dt>Input tokens</dt><dd id="usage-input-tokens">0</dd></div>
+          <div><dt>Output tokens</dt><dd id="usage-output-tokens">0</dd></div>
+          <div><dt>Total tokens</dt><dd id="usage-total-tokens">0</dd></div>
+          <div><dt>Tavily credits</dt><dd id="usage-tavily-credits">0</dd></div>
+        </dl>
+      </section>
+
       <section id="results-section" class="results-section" aria-labelledby="results-heading" hidden>
         <div class="section-heading-row">
           <h2 id="results-heading" class="section-title">Claims</h2>
@@ -73,6 +92,33 @@
         </p>
       </section>
     </main>
+
+    <dialog id="credentials-dialog" class="credentials-dialog">
+      <form id="credentials-form" method="dialog">
+        <div class="dialog-heading">
+          <div>
+            <h2>Provider API keys</h2>
+            <p>Keys stay in this browser session and are sent only for checks you start.</p>
+          </div>
+          <button id="credentials-close" class="icon-action" type="button" title="Close" aria-label="Close">
+            <span data-icon="x" data-icon-size="18"></span>
+          </button>
+        </div>
+        <label class="field-label" for="deepinfra-key">DeepInfra API key</label>
+        <input id="deepinfra-key" class="text-input" type="password" autocomplete="off" spellcheck="false" minlength="8" maxlength="512" required>
+        <label class="field-label" for="tavily-key">Tavily API key</label>
+        <input id="tavily-key" class="text-input" type="password" autocomplete="off" spellcheck="false" minlength="8" maxlength="512" required>
+        <p id="credentials-error" class="field-error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button id="credentials-clear" class="secondary-action" type="button">
+            <span data-icon="trash-2" data-icon-size="16"></span><span>Clear</span>
+          </button>
+          <button id="credentials-save" class="primary-action compact-action" type="submit">
+            <span data-icon="check" data-icon-size="16"></span><span>Save keys</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
 
     <div id="live-status" class="sr-only" aria-live="polite" aria-atomic="true"></div>
     <script type="module" src="sidepanel.js"></script>

@@ -93,6 +93,46 @@ a:focus-visible {
   border-radius: 6px;
 }
 
+.header-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.icon-action {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  display: inline-grid;
+  place-items: center;
+  position: relative;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.icon-action:hover {
+  color: var(--text);
+  background: var(--surface-muted);
+}
+
+.credential-dot {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--surface);
+  border-radius: 50%;
+  background: var(--red);
+}
+
+.icon-action[data-status="ready"] .credential-dot {
+  background: var(--green);
+}
+
 .backend-status {
   min-width: 44px;
   min-height: 44px;
@@ -378,6 +418,87 @@ section {
   background: #dfe3e6;
   color: #7c8790;
   cursor: not-allowed;
+}
+
+.compact-action {
+  width: auto;
+  min-width: 116px;
+  min-height: 44px;
+  margin-top: 0;
+}
+
+.usage-grid {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border-top: 1px solid var(--border);
+}
+
+.usage-grid > div {
+  min-width: 0;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.usage-grid > div:nth-child(odd) {
+  padding-right: 12px;
+}
+
+.usage-grid dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.usage-grid dd {
+  margin: 2px 0 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.credentials-dialog {
+  width: min(420px, calc(100vw - 24px));
+  max-height: calc(100vh - 32px);
+  padding: 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 16px 40px rgba(26, 34, 42, 0.2);
+}
+
+.credentials-dialog::backdrop {
+  background: rgba(29, 35, 42, 0.42);
+}
+
+.dialog-heading {
+  margin-bottom: 16px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dialog-heading h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.dialog-heading p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.credentials-dialog .text-input {
+  margin-bottom: 14px;
+}
+
+.dialog-actions {
+  margin-top: 18px;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .icon,

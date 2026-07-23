@@ -43,6 +43,13 @@ const ICONS = Object.freeze({
     ["circle", { cx: "11", cy: "11", r: "8" }],
     ["path", { d: "m21 21-4.3-4.3" }],
   ],
+  "key-round": [
+    ["circle", { cx: "7.5", cy: "15.5", r: "5.5" }],
+    ["path", { d: "m21 2-9.6 9.6M15 5l4 4M18 2l4 4" }],
+  ],
+  "trash-2": [
+    ["path", { d: "M3 6h18M8 6V4h8v2M19 6l-1 15H6L5 6M10 11v6M14 11v6" }],
+  ],
 });
 
 export function createIcon(name, size = 18) {

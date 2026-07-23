@@ -6,7 +6,9 @@ import {
   apiUrl,
   buildCheckPayload,
   normalizeHttpUrl,
+  normalizeProviderCredentials,
   retryCheckClaim,
+  streamCheckEvents,
 } from "../api.js";
 
 test("apiUrl builds same-origin API URLs", () => {
@@ -58,6 +60,20 @@ test("buildCheckPayload validates URL and text modes", () => {
   assert.throws(() => buildCheckPayload({ mode: "text", text: "Too short" }), /at least 20/);
 });
 
+test("normalizeProviderCredentials requires both keys without exposing them", () => {
+  assert.deepEqual(normalizeProviderCredentials({
+    deepinfraKey: " deepinfra-test-key ",
+    tavilyKey: " tavily-test-key ",
+  }), {
+    deepinfraKey: "deepinfra-test-key",
+    tavilyKey: "tavily-test-key",
+  });
+  assert.throws(
+    () => normalizeProviderCredentials({ deepinfraKey: "short", tavilyKey: "tavily-test-key" }),
+    /DeepInfra/,
+  );
+});
+
 test("retryCheckClaim starts only the selected claim retry", async () => {
   const originalFetch = globalThis.fetch;
   let captured;
@@ -70,11 +86,62 @@ test("retryCheckClaim starts only the selected claim retry", async () => {
   };
 
   try {
-    const response = await retryCheckClaim("check-1", 3);
+    const response = await retryCheckClaim(
+      "check-1",
+      3,
+      "job-access-token",
+      { deepinfraKey: "deepinfra-test-key", tavilyKey: "tavily-test-key" },
+      "install-1",
+    );
     assert.equal(response.status, "running");
     assert.equal(captured.url, "http://127.0.0.1:8000/v1/checks/check-1/claims/3/retry");
     assert.equal(captured.options.method, "POST");
     assert.equal(captured.options.body, undefined);
+    assert.equal(captured.options.headers.Authorization, "Bearer job-access-token");
+    assert.equal(captured.options.headers["X-DeepInfra-Key"], "deepinfra-test-key");
+    assert.equal(captured.options.headers["X-Tavily-Key"], "tavily-test-key");
+    assert.equal(captured.options.headers["X-Client-Id"], "install-1");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("streamCheckEvents sends capability headers and parses named events", async () => {
+  const originalFetch = globalThis.fetch;
+  let captured;
+  const encoder = new TextEncoder();
+  globalThis.fetch = async (url, options) => {
+    captured = { url, options };
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(
+          "id: 7\nevent: usage\ndata: {\"complete\":true}\n\n",
+        ));
+        controller.close();
+      },
+    }), {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  };
+
+  const events = [];
+  try {
+    await streamCheckEvents({
+      eventsPath: "/v1/checks/check-1/events",
+      jobToken: "job-access-token",
+      clientId: "install-1",
+      lastEventId: 6,
+      onEvent: (event) => events.push(event),
+    });
+    assert.equal(captured.options.headers.Authorization, "Bearer job-access-token");
+    assert.equal(captured.options.headers["Last-Event-ID"], "6");
+    assert.equal(captured.options.headers["X-Client-Id"], "install-1");
+    assert.deepEqual(events, [{
+      type: "usage",
+      lastEventId: "7",
+      data: "{\"complete\":true}",
+    }]);
   } finally {
     globalThis.fetch = originalFetch;
   }
