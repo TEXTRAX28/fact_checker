@@ -10,12 +10,15 @@ import {
   retryCheckClaim,
   streamCheckEvents,
 } from "../api.js";
+import { API_BASE_URL } from "../config.js";
+
+const API_ORIGIN = new URL(API_BASE_URL).origin;
 
 test("apiUrl builds same-origin API URLs", () => {
-  assert.equal(apiUrl("/health"), "http://127.0.0.1:8000/health");
+  assert.equal(apiUrl("/health"), `${API_ORIGIN}/health`);
   assert.equal(
     apiUrl("/v1/checks/check-1/events"),
-    "http://127.0.0.1:8000/v1/checks/check-1/events",
+    `${API_ORIGIN}/v1/checks/check-1/events`,
   );
   assert.throws(
     () => apiUrl("https://example.com/v1/checks/check-1"),
@@ -94,7 +97,7 @@ test("retryCheckClaim starts only the selected claim retry", async () => {
       "install-1",
     );
     assert.equal(response.status, "running");
-    assert.equal(captured.url, "http://127.0.0.1:8000/v1/checks/check-1/claims/3/retry");
+    assert.equal(captured.url, `${API_ORIGIN}/v1/checks/check-1/claims/3/retry`);
     assert.equal(captured.options.method, "POST");
     assert.equal(captured.options.body, undefined);
     assert.equal(captured.options.headers.Authorization, "Bearer job-access-token");
