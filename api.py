@@ -337,7 +337,9 @@ def create_app(manager_factory=_manager_from_env) -> FastAPI:
                     "img-src 'self'; base-uri 'none'; form-action 'none'; "
                     "frame-ancestors 'none'"
                 ),
-                "Cache-Control": "public, max-age=3600",
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
             },
         )
 
