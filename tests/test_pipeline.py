@@ -26,11 +26,11 @@ class FakeChatStream:
         self.closed = True
 
 
-def fake_provider_context(*, deepinfra=None, tavily=None):
+def fake_provider_context(*, gemini=None, tavily=None):
     context = ProviderContext(
-        ProviderCredentials.create("deepinfra-test-key", "tavily-test-key")
+        ProviderCredentials.create("gemini-test-key", "tavily-test-key")
     )
-    context._deepinfra_client = deepinfra
+    context._gemini_client = gemini
     context._tavily_client = tavily
     return context
 
@@ -606,14 +606,14 @@ def test_tavily_timeout_retries_are_bounded(monkeypatch):
     assert attempts == fact_checker.PROVIDER_MAX_RETRIES + 1
 
 
-def test_deepinfra_chat_has_an_explicit_request_timeout(monkeypatch):
+def test_gemini_chat_has_an_explicit_request_timeout(monkeypatch):
     captured = {}
     response = FakeChatStream("[", "]")
     completions = SimpleNamespace(
         create=lambda **kwargs: captured.update(kwargs) or response
     )
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    providers = fake_provider_context(deepinfra=client)
+    providers = fake_provider_context(gemini=client)
 
     response_format = {"type": "json_object"}
     assert fact_checker._chat(
@@ -621,15 +621,16 @@ def test_deepinfra_chat_has_an_explicit_request_timeout(monkeypatch):
         response_format=response_format,
         provider_context=providers,
     ) == "[]"
-    assert captured["timeout"] == fact_checker.DEEPINFRA_TIMEOUT_SECONDS
-    assert captured["temperature"] == 0
-    assert captured["extra_body"] == {"reasoning_effort": "none"}
+    assert captured["timeout"] == fact_checker.GEMINI_TIMEOUT_SECONDS
+    assert "temperature" not in captured
+    assert captured["reasoning_effort"] == "minimal"
     assert captured["response_format"] == response_format
     assert captured["stream"] is True
+    assert captured["stream_options"] == {"include_usage": True}
     assert response.closed is True
 
 
-def test_deepinfra_stream_usage_is_recorded_by_stage_and_claim():
+def test_gemini_stream_usage_is_recorded_by_stage_and_claim():
     class UsageStream(FakeChatStream):
         def __iter__(self):
             events = list(super().__iter__())
@@ -647,7 +648,7 @@ def test_deepinfra_stream_usage_is_recorded_by_stage_and_claim():
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
         create=lambda **_kwargs: response,
     )))
-    providers = fake_provider_context(deepinfra=client)
+    providers = fake_provider_context(gemini=client)
 
     fact_checker._chat(
         "system",
@@ -659,20 +660,20 @@ def test_deepinfra_stream_usage_is_recorded_by_stage_and_claim():
     )
 
     usage = providers.usage.snapshot()
-    assert usage["deepinfra"]["total_tokens"] == 48
-    assert usage["deepinfra"]["events"][0]["stage"] == "verification"
-    assert usage["deepinfra"]["events"][0]["claim_index"] == 3
+    assert usage["gemini"]["total_tokens"] == 48
+    assert usage["gemini"]["events"][0]["stage"] == "verification"
+    assert usage["gemini"]["events"][0]["claim_index"] == 3
     assert usage["complete"] is True
 
 
-def test_deepinfra_timeout_uses_only_the_remaining_job_budget(monkeypatch):
+def test_gemini_timeout_uses_only_the_remaining_job_budget(monkeypatch):
     captured = {}
     response = FakeChatStream("[]")
     completions = SimpleNamespace(
         create=lambda **kwargs: captured.update(kwargs) or response
     )
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    providers = fake_provider_context(deepinfra=client)
+    providers = fake_provider_context(gemini=client)
 
     deadline = time.monotonic() + 5
     assert fact_checker._chat(
@@ -681,7 +682,7 @@ def test_deepinfra_timeout_uses_only_the_remaining_job_budget(monkeypatch):
     assert 0 < captured["timeout"] <= 5
 
 
-def test_deepinfra_stream_closes_when_job_deadline_expires(monkeypatch):
+def test_gemini_stream_closes_when_job_deadline_expires(monkeypatch):
     remaining_checks = 0
     response = FakeChatStream("partial", " response")
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
@@ -695,7 +696,7 @@ def test_deepinfra_stream_closes_when_job_deadline_expires(monkeypatch):
             return 5.0
         raise fact_checker.WholeJobDeadlineExceeded()
 
-    providers = fake_provider_context(deepinfra=client)
+    providers = fake_provider_context(gemini=client)
     monkeypatch.setattr(fact_checker, "_remaining_seconds", remaining)
 
     try:
@@ -713,7 +714,7 @@ def test_deepinfra_stream_closes_when_job_deadline_expires(monkeypatch):
     assert remaining_checks == 2
 
 
-def test_deepinfra_does_not_retry_after_whole_job_deadline(monkeypatch):
+def test_gemini_does_not_retry_after_whole_job_deadline(monkeypatch):
     attempts = 0
 
     def fail(**_kwargs):
@@ -724,7 +725,7 @@ def test_deepinfra_does_not_retry_after_whole_job_deadline(monkeypatch):
     client = SimpleNamespace(
         chat=SimpleNamespace(completions=SimpleNamespace(create=fail))
     )
-    providers = fake_provider_context(deepinfra=client)
+    providers = fake_provider_context(gemini=client)
 
     try:
         fact_checker._chat(

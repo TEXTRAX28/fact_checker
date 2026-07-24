@@ -10,7 +10,7 @@ import api
 import jobs
 
 PROVIDER_HEADERS = {
-    "X-DeepInfra-Key": "deepinfra-test-key",
+    "X-Gemini-Key": "gemini-test-key",
     "X-Tavily-Key": "tavily-test-key",
     "X-Client-Id": "test-install",
 }
@@ -94,10 +94,10 @@ def test_valid_check_requires_both_provider_keys_without_echoing_them(client):
     missing = client.post(
         "/v1/checks",
         json={"type": "text", "text": "A factual statement."},
-        headers={"X-DeepInfra-Key": "deepinfra-private-key"},
+        headers={"X-Gemini-Key": "gemini-private-key"},
     )
     assert missing.status_code == 400
-    assert "deepinfra-private-key" not in missing.text
+    assert "gemini-private-key" not in missing.text
     assert "Tavily" in missing.text
 
 
@@ -109,7 +109,7 @@ def test_job_token_is_returned_once_and_never_enters_snapshots(client):
     snapshot = wait_for_status(client, created, "completed")
     assert "job_token" not in snapshot
     assert created["job_token"] not in str(snapshot)
-    assert "deepinfra-test-key" not in str(snapshot)
+    assert "gemini-test-key" not in str(snapshot)
     assert "tavily-test-key" not in str(snapshot)
 
 
@@ -335,7 +335,7 @@ def test_sse_replays_after_last_event_and_ends_at_terminal(client, monkeypatch):
 def test_usage_is_exposed_as_cumulative_public_totals(client, monkeypatch):
     def checking(*_args, **kwargs):
         usage = kwargs["provider_context"].usage
-        usage.record_deepinfra(
+        usage.record_gemini(
             model="test-model",
             stage="extraction",
             claim_index=None,
@@ -355,10 +355,10 @@ def test_usage_is_exposed_as_cumulative_public_totals(client, monkeypatch):
     monkeypatch.setattr(jobs.service, "check_text", checking)
     created = create_check(client, {"type": "text", "text": "factual body"}).json()
     snapshot = wait_for_status(client, created, "completed")
-    assert snapshot["usage"]["deepinfra"]["total_tokens"] == 120
+    assert snapshot["usage"]["gemini"]["total_tokens"] == 120
     assert snapshot["usage"]["tavily"]["estimated_credits"] == 2
     assert snapshot["usage"]["complete"] is True
-    assert "deepinfra-test-key" not in str(snapshot)
+    assert "gemini-test-key" not in str(snapshot)
     assert "tavily-test-key" not in str(snapshot)
 
 
@@ -497,7 +497,7 @@ def test_development_cors_and_private_network_preflight(monkeypatch):
                 "Access-Control-Request-Method": "POST",
                 "Access-Control-Request-Headers": (
                     "Authorization, Content-Type, Last-Event-ID, X-Client-Id, "
-                    "X-DeepInfra-Key, X-Tavily-Key"
+                    "X-Gemini-Key, X-Tavily-Key"
                 ),
                 "Access-Control-Request-Private-Network": "true",
             },

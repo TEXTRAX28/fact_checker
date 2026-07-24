@@ -36,7 +36,7 @@ Chrome extension
       v
 api.py -> jobs.py -> service.py -> fact_checker.py
                                       |
-                                      +-> DeepInfra (claim extraction and verification)
+                                      +-> Gemini (claim extraction and verification)
                                       +-> Tavily (evidence search)
 ```
 
@@ -59,7 +59,7 @@ logic are not duplicated in frontend code.
 
 1. Validate and normalize the submitted URL or text.
 2. For URL mode, retrieve readable article content through Jina Reader.
-3. Ask DeepSeek V4 Flash through DeepInfra to extract up to 15 factual claims and a
+3. Ask Gemini 3.5 Flash-Lite through Google AI Studio to extract up to 15 factual claims and a
    targeted search query for each claim.
 4. Search Tavily for evidence, excluding configured social and user-generated
    domains and rejecting low-relevance results.
@@ -87,7 +87,7 @@ results retain their original claim indexes even when they finish out of order.
 - Provider failures are sanitized before being returned through the API.
 - Provider keys are isolated per job and never enter snapshots, events, or
   exports.
-- Hosted jobs share explicit process-wide DeepInfra and Tavily concurrency
+- Hosted jobs share explicit process-wide Gemini and Tavily concurrency
   limits.
 
 ## Requirements
@@ -95,7 +95,7 @@ results retain their original claim indexes even when they finish out of order.
 - Python 3.13
 - Chrome 116 or newer
 - Node.js for extension tests and validation
-- A DeepInfra API key
+- A Gemini API key from Google AI Studio
 - A Tavily API key
 
 Runtime dependencies are pinned in `requirements.txt`. Development and test
@@ -120,7 +120,7 @@ python -m pip install -r requirements-dev.txt
 For runtime-only installation, use `requirements.txt` instead.
 
 The extension uses bring-your-own-key (BYOK). Start the API, open the key button
-in the side panel, and enter the DeepInfra and Tavily keys that should pay for
+in the side panel, and enter the Gemini and Tavily keys that should pay for
 the check. Keys are stored in `chrome.storage.session`, so closing Chrome clears
 them.
 
@@ -135,7 +135,7 @@ Fill in both values in `.env`:
 
 ```dotenv
 TAVILY_API_KEY=your_tavily_key
-DEEPINFRA_API_KEY=your_deepinfra_key
+GEMINI_API_KEY=your_gemini_key
 ```
 
 The real `.env` file is ignored by Git. Do not commit API keys.
@@ -172,7 +172,7 @@ connections.
 | `GET` | `/health` | Public | Backend readiness |
 | `GET` | `/privacy` | Public | Privacy policy |
 | `GET` | `/support` | Public | Support information |
-| `POST` | `/v1/checks` | DeepInfra and Tavily key headers | Create a check |
+| `POST` | `/v1/checks` | Gemini and Tavily key headers | Create a check |
 | `GET` | `/v1/checks/{job_id}` | Job bearer capability | Read the current snapshot |
 | `GET` | `/v1/checks/{job_id}/events` | Job bearer capability | Stream events through SSE |
 | `DELETE` | `/v1/checks/{job_id}` | Job bearer capability | Request cancellation |
@@ -194,8 +194,8 @@ SHA-256 hash. Every later job operation sends the token as
 
 ## Usage Accounting
 
-The side panel and exports show cumulative DeepInfra input, output, and total
-tokens plus Tavily search attempts and estimated credits. DeepInfra values come
+The side panel and exports show cumulative Gemini input, output, and total
+tokens plus Tavily search attempts and estimated credits. Gemini values come
 from provider-reported stream metadata. Tavily advanced searches are labeled as
 an estimate of two credits per successful search. A partial marker is shown
 when a provider fails or does not report token usage. Replayed SSE events replace
@@ -213,11 +213,11 @@ CORS_ORIGINS=chrome-extension://your_32_character_extension_id
 JOB_MAX_WORKERS=1
 JOB_CAPACITY=8
 JOB_CREATION_RATE_LIMIT=5
-DEEPINFRA_CONCURRENCY=3
+GEMINI_CONCURRENCY=3
 TAVILY_CONCURRENCY=4
 ```
 
-Do not set developer DeepInfra or Tavily keys on Railway. After Railway assigns
+Do not set developer Gemini or Tavily keys on Railway. After Railway assigns
 an HTTPS domain, configure the extension and its exact host permission together:
 
 ```powershell

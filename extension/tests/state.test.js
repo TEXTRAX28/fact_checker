@@ -131,7 +131,7 @@ test("mergeEvent replaces provider usage totals without double counting replay",
   const current = normalizeSnapshot({ id: "check-usage", status: "running", sequence: 4 });
   const data = {
     sequence: 5,
-    deepinfra: {
+    gemini: {
       requests: 2,
       successful_requests: 2,
       input_tokens: 120,
@@ -149,7 +149,7 @@ test("mergeEvent replaces provider usage totals without double counting replay",
   };
   const merged = mergeEvent(current, data, "usage");
   const replayed = mergeEvent(merged, data, "usage");
-  assert.equal(replayed.usage.deepinfra.totalTokens, 150);
+  assert.equal(replayed.usage.gemini.totalTokens, 150);
   assert.equal(replayed.usage.tavily.estimatedCredits, 6);
   assert.equal(replayed.usage.complete, true);
 });
@@ -237,7 +237,7 @@ test("every real jobs.py terminal status is recognized as terminal, with non-gen
   // jobs.py::TERMINAL_STATUSES = {cancelled, completed, failed, invalid_input,
   // no_claims, no_evidence, partial, rate_limited, timeout, unreadable}. Missing
   // any of these here means that outcome leaves the UI stuck forever - this is
-  // the exact bug a live DeepInfra timeout exposed (status: "timeout" was not
+  // the exact bug a live provider timeout exposed (status: "timeout" was not
   // recognized as terminal before this fix).
   const backendTerminalStatuses = [
     "cancelled", "completed", "failed", "invalid_input", "no_claims",
@@ -372,10 +372,10 @@ test("exports include usage totals but never capabilities or provider keys", () 
     status: "completed",
     results: [],
     job_token: "private-job-token",
-    deepinfraKey: "private-deepinfra-key",
+    geminiKey: "private-gemini-key",
     tavilyKey: "private-tavily-key",
     usage: {
-      deepinfra: {
+      gemini: {
         input_tokens: 80,
         output_tokens: 20,
         total_tokens: 100,
@@ -397,7 +397,7 @@ test("exports include usage totals but never capabilities or provider keys", () 
   assert.match(serialized, /"totalTokens":100/);
   assert.match(serialized, /"estimatedCredits":4/);
   assert.doesNotMatch(serialized, /private-job-token/);
-  assert.doesNotMatch(serialized, /private-deepinfra-key/);
+  assert.doesNotMatch(serialized, /private-gemini-key/);
   assert.doesNotMatch(serialized, /private-tavily-key/);
 });
 

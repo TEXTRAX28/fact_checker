@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 
-DEEPINFRA_HEADER = "X-DeepInfra-Key"
+GEMINI_HEADER = "X-Gemini-Key"
 TAVILY_HEADER = "X-Tavily-Key"
 MIN_PROVIDER_KEY_LENGTH = 8
 MAX_PROVIDER_KEY_LENGTH = 512
@@ -22,15 +22,15 @@ class InvalidProviderCredentials(ValueError):
 class ProviderConcurrencyGate:
     """Process-wide limits shared by every hosted provider context."""
 
-    def __init__(self, *, deepinfra_limit: int, tavily_limit: int):
-        if deepinfra_limit < 1 or tavily_limit < 1:
+    def __init__(self, *, gemini_limit: int, tavily_limit: int):
+        if gemini_limit < 1 or tavily_limit < 1:
             raise ValueError("Provider concurrency limits must be positive.")
-        self._deepinfra = threading.BoundedSemaphore(deepinfra_limit)
+        self._gemini = threading.BoundedSemaphore(gemini_limit)
         self._tavily = threading.BoundedSemaphore(tavily_limit)
 
     @contextmanager
-    def deepinfra_slot(self, timeout: float | None = None):
-        with self._slot(self._deepinfra, timeout):
+    def gemini_slot(self, timeout: float | None = None):
+        with self._slot(self._gemini, timeout):
             yield
 
     @contextmanager
@@ -61,22 +61,22 @@ def _validate_key(value: str | None, provider: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ProviderCredentials:
-    deepinfra_api_key: str = field(repr=False)
+    gemini_api_key: str = field(repr=False)
     tavily_api_key: str = field(repr=False)
 
     @classmethod
     def create(
-        cls, deepinfra_api_key: str | None, tavily_api_key: str | None
+        cls, gemini_api_key: str | None, tavily_api_key: str | None
     ) -> "ProviderCredentials":
         return cls(
-            deepinfra_api_key=_validate_key(deepinfra_api_key, "DeepInfra"),
+            gemini_api_key=_validate_key(gemini_api_key, "Gemini"),
             tavily_api_key=_validate_key(tavily_api_key, "Tavily"),
         )
 
     @classmethod
     def from_environment(cls) -> "ProviderCredentials":
         return cls.create(
-            os.getenv("DEEPINFRA_API_KEY"),
+            os.getenv("GEMINI_API_KEY"),
             os.getenv("TAVILY_API_KEY"),
         )
 
@@ -98,10 +98,10 @@ class UsageLedger:
     def __init__(self, on_update: Callable[[dict[str, Any]], None] | None = None):
         self._lock = threading.RLock()
         self._on_update = on_update
-        self._deepinfra_events: list[dict[str, Any]] = []
+        self._gemini_events: list[dict[str, Any]] = []
         self._tavily_events: list[dict[str, Any]] = []
 
-    def record_deepinfra(
+    def record_gemini(
         self,
         *,
         model: str,
@@ -128,7 +128,7 @@ class UsageLedger:
             "reported": total_tokens is not None,
         }
         with self._lock:
-            self._deepinfra_events.append(event)
+            self._gemini_events.append(event)
             snapshot = self._snapshot_locked()
         self._notify(snapshot)
 
@@ -163,20 +163,20 @@ class UsageLedger:
             return self._snapshot_locked()
 
     def _snapshot_locked(self) -> dict[str, Any]:
-        deepinfra = copy.deepcopy(self._deepinfra_events)
+        gemini = copy.deepcopy(self._gemini_events)
         tavily = copy.deepcopy(self._tavily_events)
-        successful_deepinfra = [event for event in deepinfra if event["succeeded"]]
-        deepinfra_complete = all(event["reported"] for event in deepinfra)
+        successful_gemini = [event for event in gemini if event["succeeded"]]
+        gemini_complete = all(event["reported"] for event in gemini)
         tavily_complete = all(event["succeeded"] for event in tavily)
         return {
-            "deepinfra": {
-                "requests": len(deepinfra),
-                "successful_requests": len(successful_deepinfra),
-                "input_tokens": sum(event["input_tokens"] or 0 for event in deepinfra),
-                "output_tokens": sum(event["output_tokens"] or 0 for event in deepinfra),
-                "total_tokens": sum(event["total_tokens"] or 0 for event in deepinfra),
-                "complete": deepinfra_complete,
-                "events": deepinfra,
+            "gemini": {
+                "requests": len(gemini),
+                "successful_requests": len(successful_gemini),
+                "input_tokens": sum(event["input_tokens"] or 0 for event in gemini),
+                "output_tokens": sum(event["output_tokens"] or 0 for event in gemini),
+                "total_tokens": sum(event["total_tokens"] or 0 for event in gemini),
+                "complete": gemini_complete,
+                "events": gemini,
             },
             "tavily": {
                 "search_attempts": len(tavily),
@@ -185,7 +185,7 @@ class UsageLedger:
                 "complete": tavily_complete,
                 "events": tavily,
             },
-            "complete": deepinfra_complete and tavily_complete,
+            "complete": gemini_complete and tavily_complete,
         }
 
     def _notify(self, snapshot: dict[str, Any]) -> None:
@@ -214,7 +214,7 @@ class ProviderContext:
         self.usage = UsageLedger(on_usage)
         self._concurrency_gate = concurrency_gate
         self._lock = threading.RLock()
-        self._deepinfra_client = None
+        self._gemini_client = None
         self._tavily_client = None
 
     @classmethod
@@ -227,19 +227,19 @@ class ProviderContext:
                 self._credentials = ProviderCredentials.from_environment()
             return self._credentials
 
-    def deepinfra_client(self, *, base_url: str, timeout: float):
+    def gemini_client(self, *, base_url: str, timeout: float):
         with self._lock:
-            if self._deepinfra_client is None:
+            if self._gemini_client is None:
                 from openai import OpenAI
 
                 credentials = self._resolved_credentials()
-                self._deepinfra_client = OpenAI(
-                    api_key=credentials.deepinfra_api_key,
+                self._gemini_client = OpenAI(
+                    api_key=credentials.gemini_api_key,
                     base_url=base_url,
                     timeout=timeout,
                     max_retries=0,
                 )
-            return self._deepinfra_client
+            return self._gemini_client
 
     def tavily_client(self):
         with self._lock:
@@ -252,10 +252,10 @@ class ProviderContext:
                 )
             return self._tavily_client
 
-    def deepinfra_slot(self, timeout: float | None = None):
+    def gemini_slot(self, timeout: float | None = None):
         if self._concurrency_gate is None:
             return nullcontext()
-        return self._concurrency_gate.deepinfra_slot(timeout)
+        return self._concurrency_gate.gemini_slot(timeout)
 
     def tavily_slot(self, timeout: float | None = None):
         if self._concurrency_gate is None:
@@ -268,8 +268,8 @@ class ProviderContext:
 
     def close(self) -> None:
         with self._lock:
-            clients = (self._deepinfra_client, self._tavily_client)
-            self._deepinfra_client = None
+            clients = (self._gemini_client, self._tavily_client)
+            self._gemini_client = None
             self._tavily_client = None
             self._credentials = None
             self.usage.close()
@@ -287,29 +287,29 @@ def merge_usage(
 ) -> dict[str, Any]:
     first = first if isinstance(first, dict) else {}
     second = second if isinstance(second, dict) else {}
-    deep_events = [
-        *copy.deepcopy(first.get("deepinfra", {}).get("events", [])),
-        *copy.deepcopy(second.get("deepinfra", {}).get("events", [])),
+    gemini_events = [
+        *copy.deepcopy(first.get("gemini", {}).get("events", [])),
+        *copy.deepcopy(second.get("gemini", {}).get("events", [])),
     ]
     tavily_events = [
         *copy.deepcopy(first.get("tavily", {}).get("events", [])),
         *copy.deepcopy(second.get("tavily", {}).get("events", [])),
     ]
-    deep_complete = bool(first.get("deepinfra", {}).get("complete", True)) and bool(
-        second.get("deepinfra", {}).get("complete", True)
+    gemini_complete = bool(first.get("gemini", {}).get("complete", True)) and bool(
+        second.get("gemini", {}).get("complete", True)
     )
     tavily_complete = bool(first.get("tavily", {}).get("complete", True)) and bool(
         second.get("tavily", {}).get("complete", True)
     )
     return {
-        "deepinfra": {
-            "requests": len(deep_events),
-            "successful_requests": sum(event.get("succeeded", False) for event in deep_events),
-            "input_tokens": sum(event.get("input_tokens") or 0 for event in deep_events),
-            "output_tokens": sum(event.get("output_tokens") or 0 for event in deep_events),
-            "total_tokens": sum(event.get("total_tokens") or 0 for event in deep_events),
-            "complete": deep_complete,
-            "events": deep_events,
+        "gemini": {
+            "requests": len(gemini_events),
+            "successful_requests": sum(event.get("succeeded", False) for event in gemini_events),
+            "input_tokens": sum(event.get("input_tokens") or 0 for event in gemini_events),
+            "output_tokens": sum(event.get("output_tokens") or 0 for event in gemini_events),
+            "total_tokens": sum(event.get("total_tokens") or 0 for event in gemini_events),
+            "complete": gemini_complete,
+            "events": gemini_events,
         },
         "tavily": {
             "search_attempts": len(tavily_events),
@@ -318,5 +318,5 @@ def merge_usage(
             "complete": tavily_complete,
             "events": tavily_events,
         },
-        "complete": deep_complete and tavily_complete,
+        "complete": gemini_complete and tavily_complete,
     }

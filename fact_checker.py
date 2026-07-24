@@ -14,7 +14,7 @@ SEARCH_WORKERS = 4
 VERIFY_WORKERS = 3
 MAX_CLAIMS = 15
 MIN_INPUT_NON_WHITESPACE = 10
-DEEPINFRA_TIMEOUT_SECONDS = 40.0
+GEMINI_TIMEOUT_SECONDS = 40.0
 TAVILY_TIMEOUT_SECONDS = 15.0
 WHOLE_JOB_DEADLINE_SECONDS = 300.0
 CLAIM_RETRY_DEADLINE_SECONDS = 60.0
@@ -22,7 +22,7 @@ PROVIDER_MAX_RETRIES = 2
 MAX_EVIDENCE_PER_SOURCE_CHARS = 4_000
 MAX_EVIDENCE_TOTAL_CHARS = 10_000
 VERIFY_BACKLOG_MULTIPLIER = 2
-DEEPINFRA_REASONING_EFFORT = "none"
+GEMINI_REASONING_EFFORT = "minimal"
 
 _LANGUAGE_MARKERS = {
     "English": frozenset({
@@ -138,8 +138,8 @@ def _public_provider_error(stage: str, exc: Exception,
         error["claim_index"] = claim_index
     return error
 
-MODEL = "deepseek-ai/DeepSeek-V4-Flash"
-DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
+MODEL = "gemini-3.5-flash-lite"
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 EXTRACT_PROMPT = """Extract up to 15 most specific and verifiable factual claims from the text.
 Return a JSON array. Each item must have:
@@ -380,7 +380,7 @@ VERIFY_RESPONSE_FORMAT = {
 }
 
 
-# DeepInfra client (OpenAI-compatible)
+# Gemini client through Google's OpenAI-compatible endpoint.
 def _read_chat_stream(stream, deadline: float | None) -> tuple[str, object | None]:
     parts: list[str] = []
     usage = None
@@ -408,11 +408,11 @@ def _chat(system: str, user: str, max_tokens: int, *, deadline: float | None = N
     for attempt in range(PROVIDER_MAX_RETRIES + 1):
         try:
             slot_timeout = (
-                _bounded_timeout(DEEPINFRA_TIMEOUT_SECONDS, deadline)
+                _bounded_timeout(GEMINI_TIMEOUT_SECONDS, deadline)
                 if providers.concurrency_limited
                 else None
             )
-            with providers.deepinfra_slot(slot_timeout):
+            with providers.gemini_slot(slot_timeout):
                 request = {
                     "model": MODEL,
                     "max_tokens": max_tokens,
@@ -420,20 +420,20 @@ def _chat(system: str, user: str, max_tokens: int, *, deadline: float | None = N
                         {"role": "system", "content": system},
                         {"role": "user", "content": user},
                     ],
-                    "temperature": 0,
-                    "extra_body": {"reasoning_effort": DEEPINFRA_REASONING_EFFORT},
+                    "reasoning_effort": GEMINI_REASONING_EFFORT,
                     "stream": True,
-                    "timeout": _bounded_timeout(DEEPINFRA_TIMEOUT_SECONDS, deadline),
+                    "stream_options": {"include_usage": True},
+                    "timeout": _bounded_timeout(GEMINI_TIMEOUT_SECONDS, deadline),
                 }
                 if response_format is not None:
                     request["response_format"] = response_format
-                stream = providers.deepinfra_client(
-                    base_url=DEEPINFRA_BASE_URL,
-                    timeout=DEEPINFRA_TIMEOUT_SECONDS,
+                stream = providers.gemini_client(
+                    base_url=GEMINI_BASE_URL,
+                    timeout=GEMINI_TIMEOUT_SECONDS,
                 ).chat.completions.create(**request)
                 with stream:
                     content, usage = _read_chat_stream(stream, deadline)
-            providers.usage.record_deepinfra(
+            providers.usage.record_gemini(
                 model=MODEL,
                 stage=stage,
                 claim_index=claim_index,
@@ -443,7 +443,7 @@ def _chat(system: str, user: str, max_tokens: int, *, deadline: float | None = N
             )
             return content
         except Exception as exc:
-            providers.usage.record_deepinfra(
+            providers.usage.record_gemini(
                 model=MODEL,
                 stage=stage,
                 claim_index=claim_index,
@@ -451,7 +451,7 @@ def _chat(system: str, user: str, max_tokens: int, *, deadline: float | None = N
                 succeeded=False,
             )
             logger.warning(
-                "DeepInfra attempt %d failed (%s)",
+                "Gemini attempt %d failed (%s)",
                 attempt + 1,
                 type(exc).__name__,
             )
@@ -460,7 +460,7 @@ def _chat(system: str, user: str, max_tokens: int, *, deadline: float | None = N
                     or not _is_retryable(exc)):
                 raise
             _sleep_before_retry(attempt, deadline)
-    raise AssertionError("DeepInfra retry loop exhausted without returning or raising.")
+    raise AssertionError("Gemini retry loop exhausted without returning or raising.")
 
 def _parse_provider_array(text: str) -> tuple[list, bool]:
     text = re.sub(r"```(?:json)?\n?|```", "", text)
@@ -675,7 +675,7 @@ _DUPLICATE_CONTENT_THRESHOLD = 0.85
 def _validate_source_analysis(entries, source_count: int) -> list[dict]:
     # Drops malformed entries rather than failing the whole claim or spending a retry -
     # a partially-malformed source_analysis is still useful signal, and retrying costs
-    # a real DeepInfra call for something usually recoverable.
+    # a real Gemini call for something usually recoverable.
     valid = []
     if not isinstance(entries, list):
         return valid

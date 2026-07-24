@@ -118,7 +118,7 @@ class JobManager:
         ttl_seconds: float = 3600.0,
         history_limit: int = 256,
         claim_retry_limit: int = 2,
-        deepinfra_concurrency: int = 3,
+        gemini_concurrency: int = 3,
         tavily_concurrency: int = 4,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -134,7 +134,7 @@ class JobManager:
         self.history_limit = history_limit
         self.claim_retry_limit = claim_retry_limit
         self._provider_gate = ProviderConcurrencyGate(
-            deepinfra_limit=deepinfra_concurrency,
+            gemini_limit=gemini_concurrency,
             tavily_limit=tavily_concurrency,
         )
         self._clock = clock

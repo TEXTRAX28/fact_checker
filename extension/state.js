@@ -3,7 +3,7 @@
 // SSE never stops, the Cancel button stays pointed at an already-finished job
 // (a no-op there - jobs.py's cancel() checks job.terminal() first), and the status
 // text never leaves the generic "Check in progress" fallback, even though the
-// backend is genuinely done. Confirmed live: this is what a real DeepInfra timeout
+// backend is genuinely done. Confirmed live: this is what a real provider timeout
 // looked like before this fix - "timeout" is a real terminal status jobs.py sends,
 // and it wasn't in this set.
 export const TERMINAL_STATES = new Set([
@@ -56,31 +56,31 @@ function asNumber(value, fallback = 0) {
 }
 
 function normalizeUsage(value = {}, previous = {}) {
-  const deepinfra = value?.deepinfra || {};
+  const gemini = value?.gemini || value?.deepinfra || {};
   const tavily = value?.tavily || {};
-  const previousDeepinfra = previous?.deepinfra || {};
+  const previousGemini = previous?.gemini || previous?.deepinfra || {};
   const previousTavily = previous?.tavily || {};
   return {
-    deepinfra: {
+    gemini: {
       requests: Math.max(0, asNumber(firstDefined(
-        deepinfra.requests, previousDeepinfra.requests, 0,
+        gemini.requests, previousGemini.requests, 0,
       ))),
       successfulRequests: Math.max(0, asNumber(firstDefined(
-        deepinfra.successful_requests,
-        deepinfra.successfulRequests,
-        previousDeepinfra.successfulRequests,
+        gemini.successful_requests,
+        gemini.successfulRequests,
+        previousGemini.successfulRequests,
         0,
       ))),
       inputTokens: Math.max(0, asNumber(firstDefined(
-        deepinfra.input_tokens, deepinfra.inputTokens, previousDeepinfra.inputTokens, 0,
+        gemini.input_tokens, gemini.inputTokens, previousGemini.inputTokens, 0,
       ))),
       outputTokens: Math.max(0, asNumber(firstDefined(
-        deepinfra.output_tokens, deepinfra.outputTokens, previousDeepinfra.outputTokens, 0,
+        gemini.output_tokens, gemini.outputTokens, previousGemini.outputTokens, 0,
       ))),
       totalTokens: Math.max(0, asNumber(firstDefined(
-        deepinfra.total_tokens, deepinfra.totalTokens, previousDeepinfra.totalTokens, 0,
+        gemini.total_tokens, gemini.totalTokens, previousGemini.totalTokens, 0,
       ))),
-      complete: Boolean(firstDefined(deepinfra.complete, previousDeepinfra.complete, true)),
+      complete: Boolean(firstDefined(gemini.complete, previousGemini.complete, true)),
     },
     tavily: {
       searchAttempts: Math.max(0, asNumber(firstDefined(
@@ -538,7 +538,7 @@ export function toMarkdownReport(data) {
   if (data.source.url) lines.push(`**URL:** ${data.source.url}`);
   lines.push(`**Exported:** ${data.exportedAt}`);
   lines.push(`**Claims checked:** ${data.summary.completedCount} of ${data.summary.claimCount}`);
-  lines.push(`**DeepInfra tokens:** ${data.summary.usage.deepinfra.totalTokens}`);
+  lines.push(`**Gemini tokens:** ${data.summary.usage.gemini.totalTokens}`);
   lines.push(`**Tavily estimated credits:** ${data.summary.usage.tavily.estimatedCredits}`);
   lines.push("");
 

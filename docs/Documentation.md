@@ -1,5 +1,9 @@
 # Wikipedia Over-Representation, Work in Progress
 
+> Historical development record: examples below that mention Llama or DeepInfra
+> predate the Gemini 3.5 Flash-Lite migration completed on 24 July 2026. They are
+> retained as test history and do not describe the current provider configuration.
+
 ## Test #1
 
 When fact-checking claims, the system searches for evidence using Tavily, which returns only up to 10 results per claim. These results are then filtered to remove social/UGC domains (Facebook, YouTube, Reddit, etc.), keeping the top 3 "real" sources.

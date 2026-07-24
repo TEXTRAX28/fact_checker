@@ -16,23 +16,23 @@ from providers import (
 
 def test_credentials_validate_and_hide_secret_values():
     credentials = ProviderCredentials.create(
-        "deepinfra-private-key", "tavily-private-key"
+        "gemini-private-key", "tavily-private-key"
     )
     rendered = repr(credentials)
-    assert "deepinfra-private-key" not in rendered
+    assert "gemini-private-key" not in rendered
     assert "tavily-private-key" not in rendered
 
-    with pytest.raises(InvalidProviderCredentials, match="DeepInfra"):
+    with pytest.raises(InvalidProviderCredentials, match="Gemini"):
         ProviderCredentials.create("short", "tavily-private-key")
     with pytest.raises(InvalidProviderCredentials, match="Tavily"):
-        ProviderCredentials.create("deepinfra-private-key", "bad key")
+        ProviderCredentials.create("gemini-private-key", "bad key")
 
 
 def test_usage_ledger_is_thread_safe_and_marks_unreported_usage_partial():
     ledger = UsageLedger()
 
     def record(index):
-        ledger.record_deepinfra(
+        ledger.record_gemini(
             model="model",
             stage="verification",
             claim_index=index,
@@ -56,13 +56,13 @@ def test_usage_ledger_is_thread_safe_and_marks_unreported_usage_partial():
         list(pool.map(record, range(20)))
 
     snapshot = ledger.snapshot()
-    assert snapshot["deepinfra"]["requests"] == 20
-    assert snapshot["deepinfra"]["total_tokens"] == 240
+    assert snapshot["gemini"]["requests"] == 20
+    assert snapshot["gemini"]["total_tokens"] == 240
     assert snapshot["tavily"]["successful_searches"] == 20
     assert snapshot["tavily"]["estimated_credits"] == 40
     assert snapshot["complete"] is True
 
-    ledger.record_deepinfra(
+    ledger.record_gemini(
         model="model",
         stage="verification",
         claim_index=20,
@@ -75,7 +75,7 @@ def test_usage_ledger_is_thread_safe_and_marks_unreported_usage_partial():
 def test_merge_usage_adds_retry_totals_once():
     first = UsageLedger()
     second = UsageLedger()
-    first.record_deepinfra(
+    first.record_gemini(
         model="model",
         stage="extraction",
         claim_index=None,
@@ -92,7 +92,7 @@ def test_merge_usage_adds_retry_totals_once():
     )
 
     merged = merge_usage(first.snapshot(), second.snapshot())
-    assert merged["deepinfra"]["total_tokens"] == 15
+    assert merged["gemini"]["total_tokens"] == 15
     assert merged["tavily"]["estimated_credits"] == 2
     assert merged["complete"] is True
 
@@ -106,35 +106,35 @@ def test_provider_contexts_construct_clients_with_their_own_keys(monkeypatch):
 
     monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
     first = ProviderContext(
-        ProviderCredentials.create("deepinfra-first-key", "tavily-first-key")
+        ProviderCredentials.create("gemini-first-key", "tavily-first-key")
     )
     second = ProviderContext(
-        ProviderCredentials.create("deepinfra-second-key", "tavily-second-key")
+        ProviderCredentials.create("gemini-second-key", "tavily-second-key")
     )
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         list(
             pool.map(
-                lambda context: context.deepinfra_client(
-                    base_url="https://api.deepinfra.com/v1/openai",
+                lambda context: context.gemini_client(
+                    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
                     timeout=1,
                 ),
                 [first, second],
             )
         )
 
-    assert set(created_keys) == {"deepinfra-first-key", "deepinfra-second-key"}
+    assert set(created_keys) == {"gemini-first-key", "gemini-second-key"}
 
 
 def test_provider_concurrency_gate_caps_process_wide_work():
-    gate = ProviderConcurrencyGate(deepinfra_limit=2, tavily_limit=1)
+    gate = ProviderConcurrencyGate(gemini_limit=2, tavily_limit=1)
     lock = threading.Lock()
     active = 0
     peak = 0
 
     def run():
         nonlocal active, peak
-        with gate.deepinfra_slot(timeout=1):
+        with gate.gemini_slot(timeout=1):
             with lock:
                 active += 1
                 peak = max(peak, active)
@@ -159,12 +159,12 @@ def test_provider_context_close_drops_credentials_clients_and_callback():
             self.closed = True
 
     context = ProviderContext(
-        ProviderCredentials.create("deepinfra-private-key", "tavily-private-key"),
+        ProviderCredentials.create("gemini-private-key", "tavily-private-key"),
         on_usage=updates.append,
     )
-    deepinfra = FakeClient()
+    gemini = FakeClient()
     tavily = FakeClient()
-    context._deepinfra_client = deepinfra
+    context._gemini_client = gemini
     context._tavily_client = tavily
 
     context.close()
@@ -177,8 +177,8 @@ def test_provider_context_close_drops_credentials_clients_and_callback():
     )
 
     assert context._credentials is None
-    assert context._deepinfra_client is None
+    assert context._gemini_client is None
     assert context._tavily_client is None
-    assert deepinfra.closed is True
+    assert gemini.closed is True
     assert tavily.closed is True
     assert updates == []

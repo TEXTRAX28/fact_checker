@@ -43,7 +43,7 @@ const elements = {
   credentialsClose: document.querySelector("#credentials-close"),
   credentialsClear: document.querySelector("#credentials-clear"),
   credentialsError: document.querySelector("#credentials-error"),
-  deepinfraKey: document.querySelector("#deepinfra-key"),
+  geminiKey: document.querySelector("#gemini-key"),
   tavilyKey: document.querySelector("#tavily-key"),
   modeControl: document.querySelector("#mode-control"),
   inputPanel: document.querySelector("#input-panel"),
@@ -75,7 +75,7 @@ const elements = {
 const app = {
   mode: "page",
   drafts: { url: "", text: "" },
-  credentials: { deepinfraKey: "", tavilyKey: "" },
+  credentials: { geminiKey: "", tavilyKey: "" },
   installId: "",
   page: null,
   activeTabId: null,
@@ -221,17 +221,17 @@ function hasProviderCredentials() {
 }
 
 function openCredentialsDialog() {
-  elements.deepinfraKey.value = app.credentials.deepinfraKey || "";
+  elements.geminiKey.value = app.credentials.geminiKey || "";
   elements.tavilyKey.value = app.credentials.tavilyKey || "";
   elements.credentialsError.hidden = true;
   elements.credentialsDialog.showModal();
-  elements.deepinfraKey.focus();
+  elements.geminiKey.focus();
 }
 
 async function saveCredentials() {
   try {
     app.credentials = normalizeProviderCredentials({
-      deepinfraKey: elements.deepinfraKey.value,
+      geminiKey: elements.geminiKey.value,
       tavilyKey: elements.tavilyKey.value,
     });
     await chrome.storage.session.set({ [STORAGE.credentials]: app.credentials });
@@ -246,8 +246,8 @@ async function saveCredentials() {
 }
 
 async function clearCredentials() {
-  app.credentials = { deepinfraKey: "", tavilyKey: "" };
-  elements.deepinfraKey.value = "";
+  app.credentials = { geminiKey: "", tavilyKey: "" };
+  elements.geminiKey.value = "";
   elements.tavilyKey.value = "";
   await chrome.storage.session.remove(STORAGE.credentials);
   elements.credentialsDialog.close();
@@ -442,7 +442,7 @@ function renderAction() {
 
   elements.primary.dataset.action = action;
   elements.primary.title = !running && !hasProviderCredentials()
-    ? "Add your DeepInfra and Tavily API keys first."
+    ? "Add your Gemini and Tavily API keys first."
     : "";
   elements.primaryLabel.textContent = label;
   elements.primaryIcon.replaceChildren(createIcon(iconName, 18));
@@ -474,15 +474,15 @@ function renderBackend() {
 
 function renderUsage() {
   const usage = app.snapshot.usage;
-  const deepinfra = usage?.deepinfra || {};
+  const gemini = usage?.gemini || {};
   const tavily = usage?.tavily || {};
-  const hasUsage = Number(deepinfra.requests || 0) > 0
+  const hasUsage = Number(gemini.requests || 0) > 0
     || Number(tavily.searchAttempts || 0) > 0;
   elements.usageSection.hidden = !app.job || !hasUsage;
   if (elements.usageSection.hidden) return;
-  elements.usageInputTokens.textContent = Number(deepinfra.inputTokens || 0).toLocaleString();
-  elements.usageOutputTokens.textContent = Number(deepinfra.outputTokens || 0).toLocaleString();
-  elements.usageTotalTokens.textContent = Number(deepinfra.totalTokens || 0).toLocaleString();
+  elements.usageInputTokens.textContent = Number(gemini.inputTokens || 0).toLocaleString();
+  elements.usageOutputTokens.textContent = Number(gemini.outputTokens || 0).toLocaleString();
+  elements.usageTotalTokens.textContent = Number(gemini.totalTokens || 0).toLocaleString();
   elements.usageTavilyCredits.textContent = Number(tavily.estimatedCredits || 0).toLocaleString();
   elements.usageStatus.textContent = usage.complete ? "Reported" : "Partial";
 }
