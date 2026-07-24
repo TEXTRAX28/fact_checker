@@ -41,6 +41,7 @@ const requiredFiles = [
 for (const file of requiredFiles) assert.ok(statSync(join(root, file)).isFile(), `${file} is missing`);
 
 const html = readFileSync(join(root, "sidepanel.html"), "utf8");
+const sidepanel = readFileSync(join(root, "sidepanel.js"), "utf8");
 assert.doesNotMatch(html, /<script[^>]+src=["']https?:/i, "Remote scripts are forbidden");
 assert.doesNotMatch(html, /microphone|speech-to-text|live-stream|audio|video/i, "Forbidden feature copy found");
 assert.equal((html.match(/role="tab"/g) || []).length, 3, "All three modes must be tabs");
@@ -58,6 +59,26 @@ assert.match(
   html,
   /AI can make mistakes\. Verify important claims against the cited sources\./,
   "The results view must include an accuracy notice",
+);
+assert.match(
+  html,
+  /id="privacy-link"[^>]+target="_blank"[^>]+rel="noreferrer"/,
+  "The side panel must link to the public privacy policy",
+);
+assert.match(
+  sidepanel,
+  /privacyLink\.href\s*=\s*apiUrl\("\/privacy"\)/,
+  "The privacy link must use the configured backend origin",
+);
+assert.match(
+  sidepanel,
+  /chrome\.storage\.session\.setAccessLevel\(\{\s*accessLevel:\s*"TRUSTED_CONTEXTS"\s*\}\)/,
+  "Session storage must be restricted to trusted extension contexts",
+);
+assert.doesNotMatch(
+  sidepanel,
+  /chrome\.storage\.(?:local|sync)\.(?:get|set)\([^)]*STORAGE\.credentials/s,
+  "Provider credentials must not use persistent Chrome storage",
 );
 
 const scripts = walk(root).filter((file) => /\.(?:js|mjs)$/.test(file));

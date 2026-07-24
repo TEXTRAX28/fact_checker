@@ -791,6 +791,30 @@ section {
   font-size: 12px;
 }
 
+.app-footer {
+  min-height: 48px;
+  padding: 8px 16px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.app-footer a {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  text-underline-offset: 3px;
+}
+
+.app-footer a:hover {
+  color: var(--blue);
+}
+
 .source-list {
   margin: 11px 0 0;
   padding: 10px 0 0;

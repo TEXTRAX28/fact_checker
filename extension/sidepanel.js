@@ -1,5 +1,6 @@
 import {
   ApiError,
+  apiUrl,
   buildCheckPayload,
   cancelCheck,
   createCheck,
@@ -70,6 +71,7 @@ const elements = {
   resultsList: document.querySelector("#results-list"),
   exportActions: document.querySelector("#export-actions"),
   liveStatus: document.querySelector("#live-status"),
+  privacyLink: document.querySelector("#privacy-link"),
 };
 
 const app = {
@@ -97,6 +99,8 @@ bindEvents();
 await initialize();
 
 async function initialize() {
+  elements.privacyLink.href = apiUrl("/privacy");
+  await chrome.storage.session.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
   const saved = await chrome.storage.session.get([
     STORAGE.activeJob,
     STORAGE.activeTabId,

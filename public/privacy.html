@@ -3,50 +3,172 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Privacy policy for the Fact Check Chrome extension.">
   <title>Fact Check Privacy Policy</title>
   <style>
-    :root { color-scheme: light; font: 16px/1.6 system-ui, sans-serif; color: #17202a; background: #f4f6f8; }
+    :root {
+      color-scheme: light;
+      font: 16px/1.65 system-ui, sans-serif;
+      color: #17202a;
+      background: #f4f6f8;
+    }
     body { margin: 0; }
-    main { width: min(760px, calc(100% - 32px)); margin: 40px auto; background: #fff; border: 1px solid #d9e0e7; border-radius: 8px; padding: clamp(24px, 5vw, 48px); box-sizing: border-box; }
-    h1, h2 { line-height: 1.25; letter-spacing: 0; }
-    h1 { margin: 0 0 8px; font-size: 2rem; }
-    h2 { margin: 32px 0 8px; font-size: 1.15rem; }
+    main {
+      width: min(820px, calc(100% - 32px));
+      margin: 40px auto;
+      padding: clamp(24px, 5vw, 48px);
+      box-sizing: border-box;
+      border: 1px solid #d9e0e7;
+      border-radius: 8px;
+      background: #fff;
+    }
+    h1, h2, h3 { line-height: 1.25; letter-spacing: 0; }
+    h1 { margin: 0 0 8px; font-size: clamp(1.75rem, 5vw, 2.25rem); }
+    h2 { margin: 36px 0 10px; font-size: 1.3rem; }
+    h3 { margin: 22px 0 6px; font-size: 1.05rem; }
     p, ul { margin: 8px 0; }
-    .meta { color: #52606d; }
+    ul { padding-left: 24px; }
+    li + li { margin-top: 7px; }
     a { color: #075ea8; }
+    .meta { color: #52606d; }
+    .notice {
+      margin-top: 20px;
+      padding: 14px 16px;
+      border-left: 4px solid #116b52;
+      background: #edf7f3;
+    }
   </style>
 </head>
 <body>
   <main>
     <h1>Fact Check Privacy Policy</h1>
-    <p class="meta">Effective 24 July 2026</p>
+    <p class="meta">Effective and last updated: 24 July 2026</p>
 
-    <h2>What the extension processes</h2>
-    <p>Fact Check processes the page text, URL, or text you choose to check. It also processes the Google AI Studio Gemini and Tavily API keys you provide.</p>
+    <p>This Privacy Policy explains how the Fact Check Chrome extension ("Fact Check") handles information. Fact Check is operated by Natanael Rehuel Santoso ("the developer").</p>
 
-    <h2>How data is used</h2>
+    <h2>1. Purpose and scope</h2>
+    <p>Fact Check has one purpose: to help a user evaluate factual claims from a webpage, a public article URL, or text the user chooses to submit. This policy applies to the Chrome extension and the hosted Fact Check backend. It does not replace the privacy policies or terms of the third-party services listed below.</p>
+    <p>Fact Check does not continuously monitor browsing history. Page access is used only when the user opens or refreshes the extension for a page, or asks the extension to locate a checked claim on that page.</p>
+
+    <h2>2. Information processed</h2>
+
+    <h3>Content selected for checking</h3>
     <ul>
-      <li>Submitted content is sent to the Fact Check backend to run the check.</li>
-      <li>Claims and evidence are sent to the Google Gemini API for extraction and verification.</li>
-      <li>Search queries are sent to Tavily to find candidate evidence.</li>
-      <li>Your provider keys authorize those requests and charges remain on your provider accounts.</li>
+      <li>Readable page text and related article metadata, such as the page URL and title, when the user checks the current page.</li>
+      <li>A public article URL when the user chooses URL mode.</li>
+      <li>Text entered or pasted by the user when the user chooses text mode.</li>
+      <li>Claims, search queries, evidence excerpts, source links, verdicts, explanations, errors, and other results produced during a check.</li>
+    </ul>
+    <p>Submitted content may contain personal or sensitive information if the user includes it. Users should not submit confidential information or information they are not authorized to process.</p>
+
+    <h3>Provider credentials</h3>
+    <p>Fact Check uses a bring-your-own-key model. It processes the Gemini API key and Tavily API key entered by the user so that Google and Tavily can authorize the requests the user starts. The keys are not developer-owned credentials.</p>
+
+    <h3>Technical and usage information</h3>
+    <ul>
+      <li>A randomly generated installation identifier used to apply abuse and rate limits. It is not an account identifier.</li>
+      <li>Network information processed by the backend and hosting provider, including an IP address, request time, request path, and ordinary connection metadata.</li>
+      <li>A random job capability token used to restrict access to a check while it remains available.</li>
+      <li>Provider-usage information, such as Gemini token counts, Tavily search attempts, and estimated Tavily credits.</li>
+    </ul>
+    <p>Fact Check does not use cookies, advertising identifiers, analytics SDKs, or cross-site tracking.</p>
+
+    <h2>3. How information is used</h2>
+    <p>The information described above is used only to:</p>
+    <ul>
+      <li>read the page or input selected by the user;</li>
+      <li>extract factual claims;</li>
+      <li>find candidate evidence and compare claims against that evidence;</li>
+      <li>display, retry, export, or temporarily restore the user's check;</li>
+      <li>show provider-usage totals;</li>
+      <li>secure the service, enforce capacity and rate limits, diagnose failures, and prevent abuse; and</li>
+      <li>comply with applicable legal obligations.</li>
+    </ul>
+    <p>The developer does not use submitted content, browsing activity, provider keys, or results for advertising, credit decisions, data brokerage, or training a developer-owned AI model.</p>
+
+    <h2>4. Service providers and data transfers</h2>
+    <p>Information is sent only to services needed to perform the check:</p>
+    <ul>
+      <li><strong>Railway</strong> hosts the backend and therefore processes requests, submitted content, provider-key headers, results held in backend memory, and network metadata. See the <a href="https://railway.com/legal/privacy" rel="noreferrer">Railway Privacy Policy</a>.</li>
+      <li><strong>Google Gemini API</strong> receives submitted text for claim extraction and receives claims and evidence excerpts for verification. The user's Gemini key authorizes these requests. Google's treatment of API data can differ between unpaid and paid services; users should review the <a href="https://ai.google.dev/gemini-api/terms" rel="noreferrer">Gemini API Additional Terms</a> and <a href="https://policies.google.com/privacy" rel="noreferrer">Google Privacy Policy</a>. Google states that content submitted to certain unpaid Gemini services may be used to improve its products and may be reviewed by humans. Do not submit sensitive, confidential, or personal information when using an unpaid service.</li>
+      <li><strong>Tavily</strong> receives claim-derived search queries and the user's Tavily key, and returns candidate web evidence. See the <a href="https://www.tavily.com/privacy" rel="noreferrer">Tavily Privacy Policy</a>.</li>
+      <li><strong>Jina AI Reader</strong> receives the public URL entered in URL mode so it can retrieve readable article content. It is not used for pasted-text checks or checks that use page text captured directly by the extension. See <a href="https://jina.ai/legal/" rel="noreferrer">Jina AI Legal Information</a>.</li>
+    </ul>
+    <p>These providers may process information in countries other than the user's country and apply their own retention, security, and legal terms. Fact Check does not control their independent processing.</p>
+
+    <h2>5. Storage and retention</h2>
+
+    <h3>In Chrome</h3>
+    <ul>
+      <li>Provider keys, drafts, captured page data, active-job recovery information, and results are stored in <code>chrome.storage.session</code> for the current Chrome profile. Provider-key storage is restricted to trusted extension contexts. It is cleared when the browser session ends or the extension is reloaded, updated, or disabled. Closing only the side panel does not clear it.</li>
+      <li>The random installation identifier is stored in <code>chrome.storage.local</code> and remains until the extension is removed or its storage is cleared.</li>
+      <li>Exports are created only when the user requests them and are saved to the download location selected by Chrome.</li>
+    </ul>
+    <p>Chrome extension storage is not a substitute for an encrypted password manager. Users can clear their provider keys from the extension at any time and should revoke a key with Google or Tavily if they believe it has been exposed.</p>
+
+    <h3>In the backend</h3>
+    <ul>
+      <li>Submitted content is held in process memory while a check runs.</li>
+      <li>Job status, claims, evidence, results, errors, and usage totals are held in process memory. They become eligible for removal one hour after the job reaches a final state and are removed during subsequent backend cleanup. A backend restart removes them sooner.</li>
+      <li>IP-address and installation-identifier entries are used during the configured short rolling rate-limit window. Stale entries are removed during subsequent backend cleanup, and a backend restart removes them sooner.</li>
+      <li>Provider keys are used only by the job or retry that received them. They are not written to a database, job snapshot, event stream, result export, or application log, and provider-client references are cleared when the operation finishes.</li>
+    </ul>
+    <p>The hosting provider may retain infrastructure and access logs under its own policy. Fact Check deliberately avoids logging request bodies and provider keys, but no internet service can guarantee that operational metadata will never be retained by its infrastructure provider.</p>
+
+    <h2>6. Sharing, sale, and human access</h2>
+    <p>The developer does not sell, rent, trade, or license user information. Information is shared only with the service providers above when necessary to provide the requested fact check, to protect the service from abuse, or when required by law.</p>
+    <p>The developer does not routinely read submitted content. Human access would be limited to information a user deliberately includes in a support report, information needed to investigate a security or abuse incident, or information required by law. Third-party providers may have different human-review practices as described in their own policies and terms.</p>
+
+    <h2>7. Chrome permissions</h2>
+    <ul>
+      <li><strong>activeTab</strong> allows access to the page where the user invokes Fact Check.</li>
+      <li><strong>scripting</strong> extracts readable page text and locates a checked claim on the open page.</li>
+      <li><strong>sidePanel</strong> displays the Fact Check interface.</li>
+      <li><strong>storage</strong> stores temporary session state, provider keys, and the installation identifier described above.</li>
+      <li><strong>Backend host access</strong> allows encrypted requests to the hosted Fact Check API.</li>
+      <li><strong>Optional website access</strong> is requested when the user asks the extension to refresh page content after navigating to another page.</li>
     </ul>
 
-    <h2>Storage and retention</h2>
-    <p>Provider keys are stored only in Chrome session storage and are sent again for each new check or retry. The backend does not write provider keys to a database, job snapshot, event, export, or application log. Active jobs and results are held in backend memory and normally expire one hour after completion. A backend restart removes them earlier.</p>
-    <p>The extension keeps a random installation identifier in Chrome local storage for rate limiting. It is not an account and is not used for advertising or cross-site tracking.</p>
+    <h2>8. Security</h2>
+    <p>Hosted requests use HTTPS. Production browser-origin access is limited by CORS to the configured published extension origin, API responses are marked not to be cached, provider credentials are isolated per job, and job results require a random capability token. These controls reduce risk but cannot guarantee absolute security.</p>
 
-    <h2>Sharing</h2>
-    <p>Data is shared only with the hosting provider needed to operate the backend and with Google and Tavily as described above. Fact Check does not sell personal data and does not include advertising or analytics.</p>
+    <h2>9. User choices and deletion</h2>
+    <ul>
+      <li>Do not start a check if you do not want the selected content sent to the backend and the applicable providers.</li>
+      <li>Clear provider keys from the key dialog, or fully exit Chrome to end the session.</li>
+      <li>Remove the extension or clear its extension storage to delete the persistent installation identifier.</li>
+      <li>Cancel an active check from the side panel. A provider request already in progress may continue until its timeout.</li>
+      <li>Manage or revoke provider keys directly through Google AI Studio and Tavily.</li>
+    </ul>
+    <p>Fact Check has no user accounts and does not maintain a user database. Backend jobs expire automatically as described above. For privacy questions, 
+      email<a href="mailto:natanaelrehuels@gmail.com">natanaelrehuels@gmail.com</a>.
+      Do not include API keys, passwords, confidential source text, or other
+      sensitive information in your email.
+    </p>
 
-    <h2>Your choices</h2>
-    <p>You can clear provider keys from the extension settings at any time. Closing the browser clears Chrome session storage. Exports are created only when you request them.</p>
+    <h2>10. Children</h2>
+    <p>Fact Check is not directed to children under 18. Google states that users of the Gemini API must be at least 18. Do not use Fact Check if you do not meet the age requirements of the provider services connected through your keys.</p>
 
-    <h2>Security and limitations</h2>
-    <p>Hosted requests use HTTPS. No system can guarantee absolute security, and AI-generated verdicts can be wrong. Verify important claims against the cited sources.</p>
+    <h2>11. Changes to this policy</h2>
+    <p>This policy may be updated when Fact Check's data practices, providers, or legal obligations change. The effective date at the top will be updated. Material changes to data practices will also be disclosed through the extension or its Chrome Web Store listing when required.</p>
 
-    <h2>Contact</h2>
-    <p>Questions and deletion requests can be submitted through the <a href="/support">support page</a>.</p>
+    <h2>12. Chrome Web Store Limited Use disclosure</h2>
+    <p class="notice"><strong>Fact Check's use and transfer of information received from Google APIs adheres to the Chrome Web Store User Data Policy, including the Limited Use requirements.</strong></p>
+
+    <h2>13. Contact</h2>
+
+<p>
+  Fact Check is operated by Natanael Rehuel Santoso. For privacy, security,
+  or support questions, contact
+  <a href="mailto:natanaelrehuels@gmail.com">
+    natanaelrehuels@gmail.com
+  </a>.
+</p>
+
+<p>
+  Never include Gemini API keys, Tavily API keys, passwords, or confidential
+  submitted content in an email.
+</p>
   </main>
 </body>
 </html>

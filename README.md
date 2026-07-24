@@ -121,8 +121,10 @@ For runtime-only installation, use `requirements.txt` instead.
 
 The extension uses bring-your-own-key (BYOK). Start the API, open the key button
 in the side panel, and enter the Gemini and Tavily keys that should pay for
-the check. Keys are stored in `chrome.storage.session`, so closing Chrome clears
-them.
+the check. Keys are stored in `chrome.storage.session`, restricted to trusted
+extension contexts, and scoped to the current Chrome profile and browser
+session. Closing Chrome clears them; closing only the side panel does not.
+Separate Chrome profiles do not share these keys.
 
 An `.env` file is optional. It is only a fallback for direct local engine
 diagnostics outside the extension. To use that fallback:

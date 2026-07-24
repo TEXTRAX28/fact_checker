@@ -362,6 +362,61 @@ def test_usage_is_exposed_as_cumulative_public_totals(client, monkeypatch):
     assert "tavily-test-key" not in str(snapshot)
 
 
+def test_concurrent_clients_keep_provider_credentials_isolated(monkeypatch):
+    observed = {}
+    lock = threading.Lock()
+    both_running = threading.Barrier(2)
+
+    def checking(text, **kwargs):
+        credentials = kwargs["provider_context"]._resolved_credentials()
+        with lock:
+            observed[text] = (
+                credentials.gemini_api_key,
+                credentials.tavily_api_key,
+            )
+        both_running.wait(timeout=2)
+        return Outcome()
+
+    monkeypatch.setattr(jobs.service, "check_text", checking)
+    manager = jobs.JobManager(max_workers=2, rate_limit=20)
+    with TestClient(api.create_app(lambda: manager)) as test_client:
+        user_a_headers = {
+            "X-Gemini-Key": "gemini-user-a-key",
+            "X-Tavily-Key": "tavily-user-a-key",
+            "X-Client-Id": "user-a-install",
+        }
+        user_b_headers = {
+            "X-Gemini-Key": "gemini-user-b-key",
+            "X-Tavily-Key": "tavily-user-b-key",
+            "X-Client-Id": "user-b-install",
+        }
+        user_a = test_client.post(
+            "/v1/checks",
+            json={"type": "text", "text": "User A factual statement."},
+            headers=user_a_headers,
+        ).json()
+        user_b = test_client.post(
+            "/v1/checks",
+            json={"type": "text", "text": "User B factual statement."},
+            headers=user_b_headers,
+        ).json()
+
+        user_a_snapshot = wait_for_status(
+            test_client, user_a, "completed"
+        )
+        user_b_snapshot = wait_for_status(
+            test_client, user_b, "completed"
+        )
+
+    assert observed == {
+        "User A factual statement.": ("gemini-user-a-key", "tavily-user-a-key"),
+        "User B factual statement.": ("gemini-user-b-key", "tavily-user-b-key"),
+    }
+    serialized = str((user_a_snapshot, user_b_snapshot))
+    assert "gemini-user-" not in serialized
+    assert "tavily-user-" not in serialized
+
+
 def test_job_capability_is_required_and_isolated(monkeypatch):
     monkeypatch.setattr(jobs.service, "check_text", lambda *_args, **_kwargs: Outcome())
     manager = jobs.JobManager(rate_limit=20)
@@ -554,6 +609,24 @@ def test_public_policy_pages_are_served_with_restrictive_headers(client, path):
     assert response.headers["content-type"].startswith("text/html")
     assert "default-src 'none'" in response.headers["content-security-policy"]
     assert response.headers["x-frame-options"] == "DENY"
+
+
+def test_privacy_policy_discloses_processors_storage_and_limited_use(client):
+    policy = client.get("/privacy").text
+    for disclosure in (
+        "Railway",
+        "Google Gemini API",
+        "Tavily",
+        "Jina AI Reader",
+        "chrome.storage.session",
+        "chrome.storage.local",
+        "IP address",
+        "one hour",
+        "does not sell",
+        "Chrome Web Store User Data Policy",
+        "Limited Use requirements",
+    ):
+        assert disclosure in policy
 
 
 def test_request_body_limit_rejects_oversized_payload_before_validation(client):
