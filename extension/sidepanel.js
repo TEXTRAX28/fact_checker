@@ -99,7 +99,7 @@ bindEvents();
 await initialize();
 
 async function initialize() {
-  elements.privacyLink.href = apiUrl("/privacy");
+  elements.privacyLink.href = apiUrl("/privacy?v=20260724-1");
   await chrome.storage.session.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
   const saved = await chrome.storage.session.get([
     STORAGE.activeJob,

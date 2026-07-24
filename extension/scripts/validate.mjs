@@ -67,7 +67,7 @@ assert.match(
 );
 assert.match(
   sidepanel,
-  /privacyLink\.href\s*=\s*apiUrl\("\/privacy"\)/,
+  /privacyLink\.href\s*=\s*apiUrl\("\/privacy\?v=20260724-1"\)/,
   "The privacy link must use the configured backend origin",
 );
 assert.match(
