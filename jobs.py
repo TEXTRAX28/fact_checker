@@ -152,7 +152,7 @@ class JobManager:
         # time. Higher configured values are clamped to prevent in-flight work
         # from succeeding after a sibling opens the 429 circuit.
         self._provider_gate = ProviderConcurrencyGate(
-            gemini_limit=1,
+            gemini_limit=2,
         )
         self._clock = clock
         self._lock = threading.RLock()
