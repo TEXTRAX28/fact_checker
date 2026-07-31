@@ -11,7 +11,6 @@ import jobs
 
 PROVIDER_HEADERS = {
     "X-Gemini-Key": "gemini-test-key",
-    "X-Tavily-Key": "tavily-test-key",
     "X-Client-Id": "test-install",
 }
 
@@ -90,15 +89,13 @@ def test_validation_rejects_invalid_variants_without_echoing_content(client, bod
     assert "200001" not in response.text
 
 
-def test_valid_check_requires_both_provider_keys_without_echoing_them(client):
+def test_valid_check_requires_gemini_key_without_echoing_it(client):
     missing = client.post(
         "/v1/checks",
         json={"type": "text", "text": "A factual statement."},
-        headers={"X-Gemini-Key": "gemini-private-key"},
     )
     assert missing.status_code == 400
-    assert "gemini-private-key" not in missing.text
-    assert "Tavily" in missing.text
+    assert "Gemini" in missing.text
 
 
 def test_job_token_is_returned_once_and_never_enters_snapshots(client):
@@ -110,7 +107,6 @@ def test_job_token_is_returned_once_and_never_enters_snapshots(client):
     assert "job_token" not in snapshot
     assert created["job_token"] not in str(snapshot)
     assert "gemini-test-key" not in str(snapshot)
-    assert "tavily-test-key" not in str(snapshot)
 
 
 def test_one_job_capability_cannot_access_another_job(client):
@@ -343,23 +339,26 @@ def test_usage_is_exposed_as_cumulative_public_totals(client, monkeypatch):
             usage={"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
             succeeded=True,
         )
-        usage.record_tavily(
+        usage.record_gemini(
+            model="test-model",
             stage="search",
             claim_index=0,
             attempt=1,
+            usage={"prompt_token_count": 50, "candidates_token_count": 10,
+                   "total_token_count": 60},
             succeeded=True,
-            search_depth="advanced",
+            search_query_count=2,
         )
         return Outcome()
 
     monkeypatch.setattr(jobs.service, "check_text", checking)
     created = create_check(client, {"type": "text", "text": "factual body"}).json()
     snapshot = wait_for_status(client, created, "completed")
-    assert snapshot["usage"]["gemini"]["total_tokens"] == 120
-    assert snapshot["usage"]["tavily"]["estimated_credits"] == 2
+    assert snapshot["usage"]["gemini"]["total_tokens"] == 180
+    assert snapshot["usage"]["google_search"]["query_count"] == 2
+    assert snapshot["usage"]["estimated_cost_usd"] == pytest.approx(0.02812)
     assert snapshot["usage"]["complete"] is True
     assert "gemini-test-key" not in str(snapshot)
-    assert "tavily-test-key" not in str(snapshot)
 
 
 def test_concurrent_clients_keep_provider_credentials_isolated(monkeypatch):
@@ -370,10 +369,7 @@ def test_concurrent_clients_keep_provider_credentials_isolated(monkeypatch):
     def checking(text, **kwargs):
         credentials = kwargs["provider_context"]._resolved_credentials()
         with lock:
-            observed[text] = (
-                credentials.gemini_api_key,
-                credentials.tavily_api_key,
-            )
+            observed[text] = credentials.gemini_api_key
         both_running.wait(timeout=2)
         return Outcome()
 
@@ -382,12 +378,10 @@ def test_concurrent_clients_keep_provider_credentials_isolated(monkeypatch):
     with TestClient(api.create_app(lambda: manager)) as test_client:
         user_a_headers = {
             "X-Gemini-Key": "gemini-user-a-key",
-            "X-Tavily-Key": "tavily-user-a-key",
             "X-Client-Id": "user-a-install",
         }
         user_b_headers = {
             "X-Gemini-Key": "gemini-user-b-key",
-            "X-Tavily-Key": "tavily-user-b-key",
             "X-Client-Id": "user-b-install",
         }
         user_a = test_client.post(
@@ -409,12 +403,11 @@ def test_concurrent_clients_keep_provider_credentials_isolated(monkeypatch):
         )
 
     assert observed == {
-        "User A factual statement.": ("gemini-user-a-key", "tavily-user-a-key"),
-        "User B factual statement.": ("gemini-user-b-key", "tavily-user-b-key"),
+        "User A factual statement.": "gemini-user-a-key",
+        "User B factual statement.": "gemini-user-b-key",
     }
     serialized = str((user_a_snapshot, user_b_snapshot))
     assert "gemini-user-" not in serialized
-    assert "tavily-user-" not in serialized
 
 
 def test_job_capability_is_required_and_isolated(monkeypatch):
@@ -551,8 +544,8 @@ def test_development_cors_and_private_network_preflight(monkeypatch):
                 "Origin": origin,
                 "Access-Control-Request-Method": "POST",
                 "Access-Control-Request-Headers": (
-                    "Authorization, Content-Type, Last-Event-ID, X-Client-Id, "
-                    "X-Gemini-Key, X-Tavily-Key"
+                        "Authorization, Content-Type, Last-Event-ID, X-Client-Id, "
+                        "X-Gemini-Key"
                 ),
                 "Access-Control-Request-Private-Network": "true",
             },
@@ -616,7 +609,7 @@ def test_privacy_policy_discloses_processors_storage_and_limited_use(client):
     for disclosure in (
         "Railway",
         "Google Gemini API",
-        "Tavily",
+        "Google Search grounding",
         "Jina AI Reader",
         "chrome.storage.session",
         "chrome.storage.local",

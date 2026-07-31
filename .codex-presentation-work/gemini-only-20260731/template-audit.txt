@@ -1,0 +1,33 @@
+Communication job
+By the end, a product or technical reviewer should understand that Fact Check now runs a complete, evidence-first fact-check using one user-supplied Gemini key, while preserving deterministic safeguards and transparent estimated usage.
+
+Chosen source
+Presentation-finished.pptx (10 slides). It is the polished, editable narrative deck. Presentation-technical.pptx (15 slides) is a denser technical expansion. Presentation.pptx (5 slides) is largely flattened into full-slide images and contains stale Tavily usage screenshots.
+
+Source structure
+- Canvas: 1280 × 720 px, 16:9.
+- Background: #F4F7FB.
+- Theme: Office; Calibri Light / Calibri.
+- Brand: blue shield/check icon, FACT CHECK wordmark, dark navy headlines, blue emphasis, muted gray supporting text.
+- Layouts: minimal centered statements, three-column labels, and a horizontal process line.
+- The source uses a single PowerPoint master and linked layouts. Output slides must remain descendants of those inherited layouts.
+- Repeated hidden date/footer/slide-number placeholders exist at layout/master level. They are not visible in source renders. Final slide XML must contain no empty local structural placeholders.
+
+Insertion contract
+- Duplicate mapped source slides only.
+- Rewrite inherited source text elements by stable element ID/name.
+- Preserve all inherited geometry, typography, spacing, background, logo assets, masters, and layouts.
+- Do not add custom panels, charts, screenshots, or overlay text.
+- Every final slide receives a [Sources] speaker-notes block.
+
+Narrative
+1. One-key thesis.
+2. Evidence and verdict separation.
+3. One Gemini BYOK key replaces two credentials.
+4. Four-stage evidence-first pipeline.
+5. Grounding safeguards.
+6. Deterministic outcomes.
+7. Security and resource controls.
+8. Transparent usage and estimated list-price equivalent.
+9. Verified implementation and test status.
+10. Closing promise.

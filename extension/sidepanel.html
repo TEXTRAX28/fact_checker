@@ -14,7 +14,7 @@
         <span>Fact Check</span>
       </div>
       <div class="header-actions">
-        <button id="credentials-action" class="icon-action" type="button" title="Provider API keys" aria-label="Provider API keys">
+        <button id="credentials-action" class="icon-action" type="button" title="Gemini API key" aria-label="Gemini API key">
           <span data-icon="key-round" data-icon-size="17"></span>
           <span class="credential-dot" aria-hidden="true"></span>
         </button>
@@ -67,15 +67,17 @@
 
       <section id="usage-section" class="usage-section" aria-labelledby="usage-heading" hidden>
         <div class="section-heading-row">
-          <h2 id="usage-heading" class="section-title">Provider usage</h2>
+          <h2 id="usage-heading" class="section-title">Usage estimate</h2>
           <span id="usage-status" class="count-label"></span>
         </div>
         <dl class="usage-grid">
           <div><dt>Input tokens</dt><dd id="usage-input-tokens">0</dd></div>
           <div><dt>Output tokens</dt><dd id="usage-output-tokens">0</dd></div>
           <div><dt>Total tokens</dt><dd id="usage-total-tokens">0</dd></div>
-          <div><dt>Tavily credits</dt><dd id="usage-tavily-credits">0</dd></div>
+          <div><dt>Search queries</dt><dd id="usage-search-queries">0</dd></div>
+          <div><dt>List-price equivalent</dt><dd id="usage-estimated-cost">$0.0000</dd></div>
         </dl>
+        <p class="field-help">Estimated list-price equivalent (before free quota) for Gemini 3.5 Flash-Lite, pricing dated 2026-07: $0.30/1M input tokens, $2.50/1M output tokens including thinking, and $0.014 per Google Search query after the free allowance. This is not your bill. <a href="https://ai.google.dev/gemini-api/docs/pricing" target="_blank" rel="noreferrer">Official pricing</a>.</p>
       </section>
 
       <section id="results-section" class="results-section" aria-labelledby="results-heading" hidden>
@@ -104,8 +106,8 @@
       <form id="credentials-form" method="dialog">
         <div class="dialog-heading">
           <div>
-            <h2>Provider API keys</h2>
-            <p>Keys stay in this browser session and are sent only for checks you start.</p>
+            <h2>Gemini API key</h2>
+            <p>The key stays in this browser session and is sent only for checks you start.</p>
           </div>
           <button id="credentials-close" class="icon-action" type="button" title="Close" aria-label="Close">
             <span data-icon="x" data-icon-size="18"></span>
@@ -113,15 +115,13 @@
         </div>
         <label class="field-label" for="gemini-key">Google AI Studio API key</label>
         <input id="gemini-key" class="text-input" type="password" autocomplete="off" spellcheck="false" minlength="8" maxlength="512" required>
-        <label class="field-label" for="tavily-key">Tavily API key</label>
-        <input id="tavily-key" class="text-input" type="password" autocomplete="off" spellcheck="false" minlength="8" maxlength="512" required>
         <p id="credentials-error" class="field-error" role="alert" hidden></p>
         <div class="dialog-actions">
           <button id="credentials-clear" class="secondary-action" type="button">
             <span data-icon="trash-2" data-icon-size="16"></span><span>Clear</span>
           </button>
           <button id="credentials-save" class="primary-action compact-action" type="submit">
-            <span data-icon="check" data-icon-size="16"></span><span>Save keys</span>
+            <span data-icon="check" data-icon-size="16"></span><span>Save key</span>
           </button>
         </div>
       </form>

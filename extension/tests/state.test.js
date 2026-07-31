@@ -139,18 +139,15 @@ test("mergeEvent replaces provider usage totals without double counting replay",
       total_tokens: 150,
       complete: true,
     },
-    tavily: {
-      search_attempts: 3,
-      successful_searches: 3,
-      estimated_credits: 6,
-      complete: true,
-    },
+    google_search: { query_count: 3 },
+    estimated_cost_usd: 0.042123,
     complete: true,
   };
   const merged = mergeEvent(current, data, "usage");
   const replayed = mergeEvent(merged, data, "usage");
   assert.equal(replayed.usage.gemini.totalTokens, 150);
-  assert.equal(replayed.usage.tavily.estimatedCredits, 6);
+  assert.equal(replayed.usage.googleSearch.queryCount, 3);
+  assert.equal(replayed.usage.estimatedCostUsd, 0.042123);
   assert.equal(replayed.usage.complete, true);
 });
 
@@ -373,7 +370,6 @@ test("exports include usage totals but never capabilities or provider keys", () 
     results: [],
     job_token: "private-job-token",
     geminiKey: "private-gemini-key",
-    tavilyKey: "private-tavily-key",
     usage: {
       gemini: {
         input_tokens: 80,
@@ -381,12 +377,8 @@ test("exports include usage totals but never capabilities or provider keys", () 
         total_tokens: 100,
         complete: true,
       },
-      tavily: {
-        search_attempts: 2,
-        successful_searches: 2,
-        estimated_credits: 4,
-        complete: true,
-      },
+      google_search: { query_count: 2 },
+      estimated_cost_usd: 0.028074,
       complete: true,
     },
   });
@@ -395,10 +387,10 @@ test("exports include usage totals but never capabilities or provider keys", () 
     buildExportData(snapshot, { mode: "text", title: "Pasted text" }),
   );
   assert.match(serialized, /"totalTokens":100/);
-  assert.match(serialized, /"estimatedCredits":4/);
+  assert.match(serialized, /"queryCount":2/);
+  assert.match(serialized, /"estimatedCostUsd":0.028074/);
   assert.doesNotMatch(serialized, /private-job-token/);
   assert.doesNotMatch(serialized, /private-gemini-key/);
-  assert.doesNotMatch(serialized, /private-tavily-key/);
 });
 
 test("buildExportData includes failed and unfinished claim slots", () => {

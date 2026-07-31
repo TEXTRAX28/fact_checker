@@ -1,0 +1,65 @@
+{"kind":"slide","id":"sl/y90nupkv","slide":1,"title":"FACT CHECK","textShapes":2}
+{"kind":"textbox","id":"sh/547294r6","slide":1,"name":"centered-wordmark","text":"FACT CHECK","textPreview":"FACT CHECK","textChars":10,"textLines":1,"bbox":[380,380,520,58]}
+{"kind":"textbox","id":"sh/k3yl0zql","slide":1,"name":"opening-tagline","text":"Verify what you read.","textPreview":"Verify what you read.","textChars":21,"textLines":1,"bbox":[340,452,600,52]}
+{"kind":"image","id":"im/3e9kr2xw","slide":1,"name":"","alt":"Fact Check shield logo","bbox":[568,218,144,144]}
+{"kind":"notes","id":"nt/y90nupkv","slide":1,"text":"Have you ever read a news article and stopped to wonder: is this actually true? That question is why I built Fact Check."}
+{"kind":"slide","id":"sl/ph7a17","slide":2,"title":"FACT CHECK","textShapes":2}
+{"kind":"textbox","id":"sh/hof69oba","slide":2,"name":"header-wordmark","text":"FACT CHECK","textPreview":"FACT CHECK","textChars":10,"textLines":1,"bbox":[124,45,180,36]}
+{"kind":"textbox","id":"sh/wnm50jup","slide":2,"name":"ai-question","text":"Why not just use\nChatGPT or Claude?","textPreview":"Why not just use | ChatGPT or Claude?","textChars":35,"textLines":2,"bbox":[150,210,980,230]}
+{"kind":"image","id":"im/rmxw7id4","slide":2,"name":"","alt":"Fact Check shield logo","bbox":[80,46,34,34]}
+{"kind":"notes","id":"nt/ph7a17","slide":2,"text":"General AI tools can browse and cite sources. But they are open-ended assistants. Fact Check is built around one repeatable verification workflow."}
+{"kind":"slide","id":"sl/hwbqtkby","slide":3,"title":"FACT CHECK","textShapes":3}
+{"kind":"textbox","id":"sh/9072xkry","slide":3,"name":"header-wordmark","text":"FACT CHECK","textPreview":"FACT CHECK","textChars":10,"textLines":1,"bbox":[124,45,180,36]}
+{"kind":"textbox","id":"sh/ozy1ofad","slide":3,"name":"evidence-statement","text":"A confident answer is not\nthe same as verified evidence.","textPreview":"A confident answer is not | the same as verified evidence.","textChars":56,"textLines":2,"bbox":[130,175,1020,210]}
+{"kind":"textbox","id":"sh/b29kza94","slide":3,"name":"evidence-subtitle","text":"Fact Check shows the claim, the reasoning, and the sources.","textPreview":"Fact Check shows the claim, the reasoning, and the sources.","textChars":59,"textLines":1,"bbox":[220,420,840,70]}
+{"kind":"image","id":"im/jah0jy1g","slide":3,"name":"","alt":"Fact Check shield logo","bbox":[80,46,34,34]}
+{"kind":"notes","id":"nt/hwbqtkby","slide":3,"text":"Instead of asking you to engineer a prompt, the platform separates claims, searches for evidence, evaluates each source, and keeps the result inspectable."}
+{"kind":"slide","id":"sl/vzkiqy","slide":4,"title":"FACT CHECK","textShapes":3}
+{"kind":"textbox","id":"sh/v6hwbepg","slide":4,"name":"header-wordmark","text":"FACT CHECK","textPreview":"FACT CHECK","textChars":10,"textLines":1,"bbox":[124,45,180,36]}
+{"kind":"textbox","id":"sh/u58vi9ov","slide":4,"name":"product-headline","text":"Fact-check any article\nwithout leaving the page.","textPreview":"Fact-check any article | without leaving the page.","textChars":48,"textLines":2,"bbox":[80,112,450,150]}
+{"kind":"textbox","id":"sh/5wjeh8ni","slide":4,"name":"product-subtitle","text":"Open the extension. Check the page. Review the evidence.","textPreview":"Open the extension. Check the page. Review the evidence.","textChars":56,"textLines":1,"bbox":[80,280,430,90]}
+{"kind":"image","id":"im/xkrmtwra","slide":4,"name":"","alt":"Fact Check shield logo","bbox":[80,46,34,34]}
+{"kind":"image","id":"im/lormxgrm","slide":4,"name":"","alt":"Fact Check extension reviewing an article beside the browser page","bbox":[535,112,665,500]}
+{"kind":"notes","id":"nt/vzkiqy","slide":4,"text":"Fact Check works inside the browser. It reads the article, identifies factual claims, and returns the results beside the original content.\n\n[Sources]\n- Internal product screenshot: C:/Users/natan/VSC Code/fact-checker/screenshots/01-check-any-page.png"}
+{"kind":"slide","id":"sl/ofy9wn61","slide":5,"title":"FACT CHECK","textShapes":6}
+{"kind":"textbox","id":"sh/cza94vmx","slide":5,"name":"header-wordmark","text":"FACT CHECK","textPreview":"FACT CHECK","textChars":10,"textLines":1,"bbox":[124,45,180,36]}
+{"kind":"textbox","id":"sh/d0jax03i","slide":5,"name":"input-title","text":"Choose what you want to check.","textPreview":"Choose what you want to check.","textChars":30,"textLines":1,"bbox":[110,125,1060,90]}
+{"kind":"textbox","id":"sh/298ryl4v","slide":5,"name":"current-page","text":"CURRENT PAGE","textPreview":"CURRENT PAGE","textChars":12,"textLines":1,"bbox":[100,315,330,70]}
+{"kind":"textbox","id":"sh/3ah8rqlg","slide":5,"name":"paste-url","text":"PASTE A URL","textPreview":"PASTE A URL","textChars":11,"textLines":1,"bbox":[475,315,330,70]}
+{"kind":"textbox","id":"sh/obq90bml","slide":5,"name":"paste-text","text":"PASTE ANY TEXT","textPreview":"PASTE ANY TEXT","textChars":14,"textLines":1,"bbox":[850,315,330,70]}
+{"kind":"textbox","id":"sh/pcjqtg36","slide":5,"name":"input-subtitle","text":"The same evidence workflow for every mode.","textPreview":"The same evidence workflow for every mode.","textChars":42,"textLines":1,"bbox":[290,445,700,60]}
+{"kind":"image","id":"im/ux4nyx0b","slide":5,"name":"","alt":"Fact Check shield logo","bbox":[80,46,34,34]}
+{"kind":"notes","id":"nt/ofy9wn61","slide":5,"text":"Users can check the page already open in Chrome, paste an article URL, or paste any paragraph directly."}
+{"kind":"slide","id":"sl/mwm18w","slide":6,"title":"FACT CHECK","textShapes":5}
+{"kind":"textbox","id":"sh/wv21srmt","slide":6,"name":"header-wordmark","text":"FACT CHECK","textPreview":"FACT CHECK","textChars":10,"textLines":1,"bbox":[124,45,180,36]}
+{"kind":"textbox","id":"sh/xwbilwny","slide":6,"name":"verdict-title","text":"Every claim gets an honest outcome.","textPreview":"Every claim gets an honest outcome.","textChars":35,"textLines":1,"bbox":[110,125,1060,90]}
+{"kind":"textbox","id":"sh/mp0jmx4b","slide":6,"name":"true","text":"TRUE","textPreview":"TRUE","textChars":4,"textLines":1,"bbox":[80,315,350,90]}
+{"kind":"textbox","id":"sh/nqt0f25w","slide":6,"name":"false","text":"FALSE","textPreview":"FALSE","textChars":5,"textLines":1,"bbox":[465,315,350,90]}
+{"kind":"textbox","id":"sh/or21o7mh","slide":6,"name":"unverifiable","text":"UNVERIFIABLE","textPreview":"UNVERIFIABLE","textChars":12,"textLines":1,"bbox":[850,315,350,90]}
+{"kind":"image","id":"im/uxszyx8n","slide":6,"name":"","alt":"Fact Check shield logo","bbox":[80,46,34,34]}
+{"kind":"notes","id":"nt/mwm18w","slide":6,"text":"The platform uses three clear outcomes: true, false, or unverifiable. It does not pretend that every question has a decisive answer."}
+{"kind":"slide","id":"sl/jyx0ra1s","slide":7,"title":"FACT CHECK","textShapes":4}
+{"kind":"textbox","id":"sh/1cj2d8b6","slide":7,"name":"header-wordmark","text":"FACT CHECK","textPreview":"FACT CHECK","textChars":10,"textLines":1,"bbox":[124,45,180,36]}
+{"kind":"textbox","id":"sh/0ba143al","slide":7,"name":"pipeline-title","text":"Evidence comes before the verdict.","textPreview":"Evidence comes before the verdict.","textChars":34,"textLines":1,"bbox":[110,150,1060,90]}
+{"kind":"textbox","id":"sh/rm1k7yt4","slide":7,"name":"pipeline","text":"ARTICLE   →   CLAIMS   →   SOURCES   →   VERDICT","textPreview":"ARTICLE   →   CLAIMS   →   SOURCES   →   VERDICT","textChars":48,"textLines":1,"bbox":[95,315,1090,100]}
+{"kind":"textbox","id":"sh/ql8jytsj","slide":7,"name":"pipeline-subtitle","text":"Each source is checked against its own claim.","textPreview":"Each source is checked against its own claim.","textChars":45,"textLines":1,"bbox":[260,450,760,60]}
+{"kind":"image","id":"im/3y1cz61w","slide":7,"name":"","alt":"Fact Check shield logo","bbox":[80,46,34,34]}
+{"kind":"notes","id":"nt/jyx0ra1s","slide":7,"text":"The system extracts factual claims, searches for evidence, evaluates each source, and only then derives the final verdict."}
+{"kind":"slide","id":"sl/62v1gy","slide":8,"title":"FACT CHECK","textShapes":3}
+{"kind":"textbox","id":"sh/ehgne1sb","slide":8,"name":"header-wordmark","text":"FACT CHECK","textPreview":"FACT CHECK","textChars":10,"textLines":1,"bbox":[124,45,180,36]}
+{"kind":"textbox","id":"sh/zipo76tw","slide":8,"name":"no-evidence","text":"No evidence?\nNo verdict.","textPreview":"No evidence? | No verdict.","textChars":24,"textLines":2,"bbox":[170,175,940,220]}
+{"kind":"textbox","id":"sh/cfe5cbal","slide":8,"name":"no-evidence-subtitle","text":"When sources are missing or conflicting, Fact Check says so.","textPreview":"When sources are missing or conflicting, Fact Check says so.","textChars":60,"textLines":1,"bbox":[230,430,820,70]}
+{"kind":"image","id":"im/wv6tw7ih","slide":8,"name":"","alt":"Fact Check shield logo","bbox":[80,46,34,34]}
+{"kind":"notes","id":"nt/62v1gy","slide":8,"text":"A safe verification system must be able to say that the available evidence is not enough. Honest uncertainty is better than fabricated confidence."}
+{"kind":"slide","id":"sl/i107q5of","slide":9,"title":"FACT CHECK","textShapes":3}
+{"kind":"textbox","id":"sh/dgbulwnm","slide":9,"name":"header-wordmark","text":"FACT CHECK","textPreview":"FACT CHECK","textChars":10,"textLines":1,"bbox":[124,45,180,36]}
+{"kind":"textbox","id":"sh/cf2tcr61","slide":9,"name":"review-title","text":"Review the reasoning.\nOpen the sources.\nExport the report.","textPreview":"Review the reasoning. | Open the sources. | Export the report.","textChars":58,"textLines":3,"bbox":[80,135,430,245]}
+{"kind":"textbox","id":"sh/z2tcnm5s","slide":9,"name":"review-subtitle","text":"The result stays useful after the check is complete.","textPreview":"The result stays useful after the check is complete.","textChars":52,"textLines":1,"bbox":[80,405,420,90]}
+{"kind":"image","id":"im/7i1cr6po","slide":9,"name":"","alt":"Fact Check shield logo","bbox":[80,46,34,34]}
+{"kind":"image","id":"im/vm1cv6p0","slide":9,"name":"","alt":"Fact Check verdict with reasoning and cited evidence","bbox":[520,115,690,520]}
+{"kind":"notes","id":"nt/i107q5of","slide":9,"text":"Every result keeps the claim, explanation, and sources together. Users can open the evidence directly or export the review as Markdown or JSON.\n\n[Sources]\n- Internal product screenshot: C:/Users/natan/VSC Code/fact-checker/screenshots/04-verdicts-and-sources.png"}
+{"kind":"slide","id":"sl/dmrji5","slide":10,"title":"FACT CHECK","textShapes":2}
+{"kind":"textbox","id":"sh/ap4zy90n","slide":10,"name":"centered-wordmark","text":"FACT CHECK","textPreview":"FACT CHECK","textChars":10,"textLines":1,"bbox":[380,380,520,58]}
+{"kind":"textbox","id":"sh/bqd07eh8","slide":10,"name":"closing-line","text":"Read. Question. Verify.","textPreview":"Read. Question. Verify.","textChars":23,"textLines":1,"bbox":[270,452,740,70]}
+{"kind":"image","id":"im/4zahwb2h","slide":10,"name":"","alt":"Fact Check shield logo","bbox":[568,218,144,144]}
+{"kind":"notes","id":"nt/dmrji5","slide":10,"text":"The next time you wonder whether something online is true, you should be able to verify it where you found it. That is Fact Check."}

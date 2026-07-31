@@ -1,8 +1,10 @@
 # Wikipedia Over-Representation, Work in Progress
 
-> Historical development record: examples below that mention Llama or DeepInfra
-> predate the Gemini 3.5 Flash-Lite migration completed on 24 July 2026. They are
-> retained as test history and do not describe the current provider configuration.
+> Historical development record: examples below that mention Llama, DeepInfra,
+> or Tavily predate the Gemini-only migration completed on 31 July 2026. The
+> current runtime uses one BYOK Gemini key and Google Search grounding. These
+> examples are retained as test history and do not describe the current provider
+> configuration.
 
 ## Test #1
 

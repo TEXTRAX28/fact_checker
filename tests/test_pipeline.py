@@ -26,12 +26,9 @@ class FakeChatStream:
         self.closed = True
 
 
-def fake_provider_context(*, gemini=None, tavily=None):
-    context = ProviderContext(
-        ProviderCredentials.create("gemini-test-key", "tavily-test-key")
-    )
+def fake_provider_context(*, gemini=None):
+    context = ProviderContext(ProviderCredentials.create("gemini-test-key"))
     context._gemini_client = gemini
-    context._tavily_client = tavily
     return context
 
 
@@ -113,6 +110,45 @@ def test_source_ranking_uses_hostname_not_url_substrings():
         "https://reuters.com/real",
         "https://en.wikipedia.org/wiki/Example",
         "https://spam.example/?ref=reuters.com",
+    ]
+
+
+def test_domain_normalizes_actual_hostname_not_userinfo_or_port():
+    assert fact_checker._domain(
+        "https://reuters.com@ATTACKER.EXAMPLE:8443/story"
+    ) == "attacker.example"
+    assert fact_checker._domain("https://WWW.REUTERS.COM.:443/story") == "reuters.com"
+    assert fact_checker._domain("https://[bad") == ""
+
+
+def test_grounded_sources_skip_malformed_citation_urls():
+    response = SimpleNamespace(
+        candidates=[SimpleNamespace(grounding_metadata=SimpleNamespace(
+            grounding_chunks=[
+                SimpleNamespace(web=SimpleNamespace(
+                    uri="https://[bad", title="reuters.com"
+                )),
+                SimpleNamespace(web=SimpleNamespace(
+                    uri="https://valid.example/story", title="Valid"
+                )),
+            ],
+            grounding_supports=[
+                SimpleNamespace(
+                    segment=SimpleNamespace(text="Malformed source text"),
+                    grounding_chunk_indices=[0],
+                ),
+                SimpleNamespace(
+                    segment=SimpleNamespace(text="Valid mapped segment"),
+                    grounding_chunk_indices=[1],
+                ),
+            ],
+            web_search_queries=["query"],
+        ))],
+    )
+
+    sources = fact_checker._grounded_sources(response)
+    assert [source["url"] for source in sources] == [
+        "https://valid.example/story"
     ]
 
 
@@ -526,139 +562,200 @@ def test_verify_future_backlog_is_bounded(monkeypatch):
     )
 
 
-def test_tavily_raw_content_is_preferred_and_evidence_is_bounded(monkeypatch):
-    captured = {}
-
-    class FakeTavily:
-        def search(self, query, **kwargs):
-            captured["query"] = query
-            captured.update(kwargs)
-            return {"results": [
-                {
-                    "url": "https://one.example/a",
-                    "score": 0.9,
-                    "raw_content": "R" * 6_000,
-                    "content": "SNIPPET_MUST_NOT_APPEAR",
-                },
-                {
-                    "url": "https://two.example/b",
-                    "score": 0.8,
-                    "raw_content": None,
-                    "content": "FALLBACK_SNIPPET",
-                },
-                {
-                    "url": "https://three.example/c",
-                    "score": 0.7,
-                    "raw_content": "T" * 8_000,
-                    "content": "OTHER_SNIPPET_MUST_NOT_APPEAR",
-                },
-            ]}
-
-    providers = fake_provider_context(tavily=FakeTavily())
-
-    # _search() now returns structured source dicts, not bare URL strings - source_index
-    # references in VERIFY_PROMPT's source_analysis rely on this list's order matching
-    # the "[N] url" headers in the evidence text exactly.
-    text, sources = fact_checker._search(
-        "bounded evidence", provider_context=providers
+def _grounded_response(text="grounded evidence", *, queries=None):
+    chunks = [
+        SimpleNamespace(web=SimpleNamespace(uri="https://official.gov/a", title="Official")),
+        SimpleNamespace(web=SimpleNamespace(uri="https://news.example/b", title="News")),
+        SimpleNamespace(web=SimpleNamespace(uri="https://reddit.com/blocked", title="reddit.com")),
+    ]
+    supports = [
+        SimpleNamespace(
+            segment=SimpleNamespace(text="Official evidence " + "R" * 5_000),
+            grounding_chunk_indices=[0],
+        ),
+        SimpleNamespace(
+            segment=SimpleNamespace(text="Independent report"),
+            grounding_chunk_indices=[1],
+        ),
+    ]
+    metadata = SimpleNamespace(
+        grounding_chunks=chunks,
+        grounding_supports=supports,
+        web_search_queries=queries or ["query one", "query two", "query one", ""],
     )
+    return SimpleNamespace(
+        text=text,
+        candidates=[SimpleNamespace(grounding_metadata=metadata)],
+        usage_metadata=SimpleNamespace(
+            prompt_token_count=40,
+            candidates_token_count=8,
+            total_token_count=48,
+        ),
+    )
+
+
+def test_grounded_search_preserves_citations_bounds_evidence_and_counts_queries():
+    captured = {}
+    response = _grounded_response()
+    client = SimpleNamespace(models=SimpleNamespace(
+        generate_content=lambda **kwargs: captured.update(kwargs) or response,
+    ))
+    providers = fake_provider_context(gemini=client)
+
+    text, sources = fact_checker._search("bounded evidence", provider_context=providers)
     blocks = text.split("\n\n")
 
-    assert captured["include_raw_content"] == "markdown"
-    assert captured["timeout"] == fact_checker.TAVILY_TIMEOUT_SECONDS
-    assert [s["url"] for s in sources] == [
-        "https://one.example/a", "https://two.example/b", "https://three.example/c"
+    assert captured["model"] == fact_checker.MODEL
+    config = captured["config"]
+    assert config.tools[0].google_search is not None
+    assert config.temperature is None
+    assert config.thinking_config.thinking_level.value == "MINIMAL"
+    assert config.http_options.timeout == fact_checker.GEMINI_TIMEOUT_SECONDS * 1000
+    assert [source["url"] for source in sources] == [
+        "https://official.gov/a", "https://news.example/b"
     ]
-    assert [s["is_full_content"] for s in sources] == [True, False, True], \
-        "raw_content used when present and non-empty; falls back to content only when raw_content is missing"
-    assert "SNIPPET_MUST_NOT_APPEAR" not in text
-    assert "OTHER_SNIPPET_MUST_NOT_APPEAR" not in text
-    assert "FALLBACK_SNIPPET" in text
+    assert all(source["is_full_content"] is False for source in sources)
+    assert "reddit.com" not in text
     assert len(text) <= fact_checker.MAX_EVIDENCE_TOTAL_CHARS
     assert all(
-        len(block.split("\n", 1)[1]) <= fact_checker.MAX_EVIDENCE_PER_SOURCE_CHARS
+        len(block.split("\n", 2)[2]) <= fact_checker.MAX_EVIDENCE_PER_SOURCE_CHARS
         for block in blocks
     )
-    # Evidence text is indexed [0], [1], [2]... in the same order as `sources`, so a
-    # model-cited source_index maps back to the correct source unambiguously.
     for index, block in enumerate(blocks):
         assert block.startswith(f"[{index}] {sources[index]['url']}\n")
-    assert providers.usage.snapshot()["tavily"]["estimated_credits"] == 2
+    usage = providers.usage.snapshot()
+    assert usage["gemini"]["total_tokens"] == 48
+    assert usage["google_search"]["query_count"] == 2
 
 
-def test_tavily_timeout_retries_are_bounded(monkeypatch):
+def test_grounded_sources_omit_unbound_chunks_and_never_reuse_whole_response():
+    response = SimpleNamespace(
+        text="WHOLE_RESPONSE_MUST_NOT_BECOME_EVIDENCE",
+        candidates=[SimpleNamespace(grounding_metadata=SimpleNamespace(
+            grounding_chunks=[
+                SimpleNamespace(web=SimpleNamespace(
+                    uri="https://bound.example/a", title="bound.example"
+                )),
+                SimpleNamespace(web=SimpleNamespace(
+                    uri="https://unbound.example/b", title="unbound.example"
+                )),
+            ],
+            grounding_supports=[SimpleNamespace(
+                segment=SimpleNamespace(text="Mapped grounded segment"),
+                grounding_chunk_indices=[0],
+            )],
+            web_search_queries=["bound query"],
+        ))],
+    )
+    sources = fact_checker._grounded_sources(response)
+    assert [source["url"] for source in sources] == ["https://bound.example/a"]
+    assert sources[0]["content"] == "Mapped grounded segment"
+    assert "WHOLE_RESPONSE" not in sources[0]["content"]
+    assert sources[0]["evidence_kind"] == "grounded_summary"
+
+
+def test_source_title_cannot_spoof_high_quality_ranking():
+    ranked = fact_checker._filter_sources([
+        {
+            "url": "https://attacker.example/a",
+            "title": "reuters.com",
+            "content": "x",
+        },
+        {
+            "url": "https://en.wikipedia.org/wiki/Example",
+            "title": "Wikipedia",
+            "content": "y",
+        },
+    ])
+    assert ranked[0]["url"].startswith("https://en.wikipedia.org/")
+
+
+def test_grounded_search_timeout_is_bounded_by_remaining_deadline():
+    captured = {}
+    client = SimpleNamespace(models=SimpleNamespace(
+        generate_content=lambda **kwargs: captured.update(kwargs) or _grounded_response(),
+    ))
+    providers = fake_provider_context(gemini=client)
+    fact_checker._search(
+        "deadline query",
+        deadline=time.monotonic() + 2,
+        provider_context=providers,
+    )
+    assert 0 < captured["config"].http_options.timeout <= 2_000
+
+
+def test_grounded_search_timeout_retries_are_bounded(monkeypatch):
     attempts = 0
 
-    class FakeTavily:
-        def search(self, *_args, **_kwargs):
-            nonlocal attempts
-            attempts += 1
-            if attempts <= fact_checker.PROVIDER_MAX_RETRIES:
-                raise TimeoutError("secret upstream timeout details")
-            return {"results": []}
+    def generate_content(**_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts <= fact_checker.PROVIDER_MAX_RETRIES:
+            raise TimeoutError("secret upstream timeout details")
+        return SimpleNamespace(
+            text="",
+            candidates=[SimpleNamespace(grounding_metadata=SimpleNamespace(
+                grounding_chunks=[], grounding_supports=[], web_search_queries=[]
+            ))],
+            usage_metadata=None,
+        )
 
-    providers = fake_provider_context(tavily=FakeTavily())
+    client = SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
+    providers = fake_provider_context(gemini=client)
     monkeypatch.setattr(fact_checker.time, "sleep", lambda _seconds: None)
-
-    assert fact_checker._search(
-        "retry query", provider_context=providers
-    ) == ("", [])
+    assert fact_checker._search("retry query", provider_context=providers) == ("", [])
     assert attempts == fact_checker.PROVIDER_MAX_RETRIES + 1
 
 
-def test_gemini_chat_has_an_explicit_request_timeout(monkeypatch):
+def test_gemini_chat_uses_official_generate_content_and_json_schema():
     captured = {}
-    response = FakeChatStream("[", "]")
-    completions = SimpleNamespace(
-        create=lambda **kwargs: captured.update(kwargs) or response
+    response = SimpleNamespace(
+        text="[]",
+        usage_metadata=SimpleNamespace(
+            prompt_token_count=4, candidates_token_count=1, total_token_count=5
+        ),
     )
-    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    client = SimpleNamespace(models=SimpleNamespace(
+        generate_content=lambda **kwargs: captured.update(kwargs) or response,
+    ))
     providers = fake_provider_context(gemini=client)
-
-    response_format = {"type": "json_object"}
+    response_format = fact_checker.EXTRACT_RESPONSE_FORMAT
     assert fact_checker._chat(
         "system", "user", 12,
         response_format=response_format,
         provider_context=providers,
     ) == "[]"
-    assert captured["timeout"] == fact_checker.GEMINI_TIMEOUT_SECONDS
-    assert "temperature" not in captured
-    assert captured["reasoning_effort"] == "minimal"
-    assert captured["response_format"] == response_format
-    assert captured["stream"] is True
-    assert captured["stream_options"] == {"include_usage": True}
-    assert response.closed is True
+    config = captured["config"]
+    assert captured["model"] == fact_checker.MODEL
+    assert captured["contents"] == "user"
+    assert config.system_instruction == "system"
+    assert config.max_output_tokens == 12
+    assert config.temperature is None
+    assert config.thinking_config.thinking_level.value == "MINIMAL"
+    assert config.http_options.timeout == fact_checker.GEMINI_TIMEOUT_SECONDS * 1000
+    assert config.response_mime_type == "application/json"
+    assert config.response_json_schema == response_format["json_schema"]["schema"]
 
 
-def test_gemini_stream_usage_is_recorded_by_stage_and_claim():
-    class UsageStream(FakeChatStream):
-        def __iter__(self):
-            events = list(super().__iter__())
-            events.append(SimpleNamespace(
-                choices=[],
-                usage=SimpleNamespace(
-                    prompt_tokens=40,
-                    completion_tokens=8,
-                    total_tokens=48,
-                ),
-            ))
-            return iter(events)
-
-    response = UsageStream("[]")
-    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
-        create=lambda **_kwargs: response,
-    )))
+def test_gemini_usage_is_recorded_by_stage_and_claim():
+    response = SimpleNamespace(
+        text="[]",
+        usage_metadata=SimpleNamespace(
+            prompt_token_count=40,
+            candidates_token_count=8,
+            total_token_count=48,
+        ),
+    )
+    client = SimpleNamespace(models=SimpleNamespace(
+        generate_content=lambda **_kwargs: response,
+    ))
     providers = fake_provider_context(gemini=client)
-
     fact_checker._chat(
-        "system",
-        "user",
-        12,
+        "system", "user", 12,
         provider_context=providers,
         stage="verification",
         claim_index=3,
     )
-
     usage = providers.usage.snapshot()
     assert usage["gemini"]["total_tokens"] == 48
     assert usage["gemini"]["events"][0]["stage"] == "verification"
@@ -666,52 +763,37 @@ def test_gemini_stream_usage_is_recorded_by_stage_and_claim():
     assert usage["complete"] is True
 
 
-def test_gemini_timeout_uses_only_the_remaining_job_budget(monkeypatch):
-    captured = {}
-    response = FakeChatStream("[]")
-    completions = SimpleNamespace(
-        create=lambda **kwargs: captured.update(kwargs) or response
+def test_gemini_checks_whole_job_deadline_after_response(monkeypatch):
+    checks = 0
+    response = SimpleNamespace(
+        text="[]",
+        usage_metadata=SimpleNamespace(
+            prompt_token_count=4, candidates_token_count=1, total_token_count=5
+        ),
     )
-    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    providers = fake_provider_context(gemini=client)
-
-    deadline = time.monotonic() + 5
-    assert fact_checker._chat(
-        "system", "user", 12, deadline=deadline, provider_context=providers
-    ) == "[]"
-    assert 0 < captured["timeout"] <= 5
-
-
-def test_gemini_stream_closes_when_job_deadline_expires(monkeypatch):
-    remaining_checks = 0
-    response = FakeChatStream("partial", " response")
-    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
-        create=lambda **_kwargs: response,
-    )))
+    client = SimpleNamespace(models=SimpleNamespace(
+        generate_content=lambda **_kwargs: response,
+    ))
 
     def remaining(_deadline):
-        nonlocal remaining_checks
-        remaining_checks += 1
-        if remaining_checks == 1:
+        nonlocal checks
+        checks += 1
+        if checks == 1:
             return 5.0
         raise fact_checker.WholeJobDeadlineExceeded()
 
     providers = fake_provider_context(gemini=client)
     monkeypatch.setattr(fact_checker, "_remaining_seconds", remaining)
-
-    try:
+    with __import__("pytest").raises(fact_checker.WholeJobDeadlineExceeded):
         fact_checker._chat(
             "system", "user", 12,
             deadline=time.monotonic() + 5,
             provider_context=providers,
         )
-    except fact_checker.WholeJobDeadlineExceeded:
-        pass
-    else:
-        raise AssertionError("expired whole-job deadline was not raised")
-
-    assert response.closed is True
-    assert remaining_checks == 2
+    assert checks == 2
+    usage = providers.usage.snapshot()
+    assert usage["gemini"]["requests"] == 1
+    assert usage["gemini"]["total_tokens"] == 5
 
 
 def test_gemini_does_not_retry_after_whole_job_deadline(monkeypatch):
@@ -722,22 +804,14 @@ def test_gemini_does_not_retry_after_whole_job_deadline(monkeypatch):
         attempts += 1
         raise TimeoutError("provider slow")
 
-    client = SimpleNamespace(
-        chat=SimpleNamespace(completions=SimpleNamespace(create=fail))
-    )
+    client = SimpleNamespace(models=SimpleNamespace(generate_content=fail))
     providers = fake_provider_context(gemini=client)
-
-    try:
+    with __import__("pytest").raises(fact_checker.WholeJobDeadlineExceeded):
         fact_checker._chat(
             "system", "user", 12,
             deadline=time.monotonic() + 0.02,
             provider_context=providers,
         )
-    except fact_checker.WholeJobDeadlineExceeded:
-        pass
-    else:
-        raise AssertionError("expired whole-job deadline was not raised")
-
     assert attempts == 1
 
 
@@ -799,19 +873,18 @@ def test_verify_one_source_analysis_overrides_inconsistent_model_fields(monkeypa
     assert verdict["verdict"] == "FALSE", "model said TRUE, but its own source_analysis says CONTRADICTS"
 
 
-def test_verify_one_falls_back_to_top_level_fields_without_source_analysis(monkeypatch):
-    # Graceful degradation: a missing/unusable source_analysis must not fail or
-    # retry the claim - fall back to the model's own supported/contradicted.
+def test_verify_one_rejects_top_level_fields_without_source_analysis(monkeypatch):
     monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: json.dumps([{
         "claim": "x", "supported": True, "contradicted": False, "verdict": "TRUE",
         "confidence": 80, "explanation": "supported",
     }]))
-    verdict = fact_checker._verify_one(
-        {"claim": "The event happened.", "speaker": "X"},
-        "evidence", [one_source()],
-    )
-    assert verdict["verdict"] == "TRUE"
-    assert verdict["source_analysis"] == []
+    with __import__("pytest").raises(
+        fact_checker.ProviderProtocolError, match="source analysis"
+    ):
+        fact_checker._verify_one(
+            {"claim": "The event happened.", "speaker": "X"},
+            "evidence", [one_source()],
+        )
 
 
 def test_verify_one_caps_confidence_without_direct_evidence(monkeypatch):

@@ -25,7 +25,6 @@ from jobs import (
 )
 from providers import (
     GEMINI_HEADER,
-    TAVILY_HEADER,
     InvalidProviderCredentials,
     ProviderCredentials,
 )
@@ -191,7 +190,6 @@ def _manager_from_env() -> JobManager:
             "FACT_CHECK_EVENT_HISTORY",
         ),
         gemini_concurrency=_env_int("GEMINI_CONCURRENCY", 3),
-        tavily_concurrency=_env_int("TAVILY_CONCURRENCY", 4),
     )
 
 
@@ -247,7 +245,6 @@ def create_app(manager_factory=_manager_from_env) -> FastAPI:
             "Last-Event-ID",
             "X-Client-Id",
             GEMINI_HEADER,
-            TAVILY_HEADER,
         ],
         allow_private_network=True,
     )
@@ -308,10 +305,7 @@ def create_app(manager_factory=_manager_from_env) -> FastAPI:
 
     def provider_credentials(request: Request) -> ProviderCredentials:
         try:
-            return ProviderCredentials.create(
-                request.headers.get(GEMINI_HEADER),
-                request.headers.get(TAVILY_HEADER),
-            )
+            return ProviderCredentials.create(request.headers.get(GEMINI_HEADER))
         except InvalidProviderCredentials as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
 

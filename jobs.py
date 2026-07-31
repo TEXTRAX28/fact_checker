@@ -119,7 +119,6 @@ class JobManager:
         history_limit: int = 256,
         claim_retry_limit: int = 2,
         gemini_concurrency: int = 3,
-        tavily_concurrency: int = 4,
         clock: Callable[[], float] = time.time,
     ) -> None:
         if max_workers < 1 or capacity < 1 or history_limit < 1 or claim_retry_limit < 1:
@@ -135,7 +134,6 @@ class JobManager:
         self.claim_retry_limit = claim_retry_limit
         self._provider_gate = ProviderConcurrencyGate(
             gemini_limit=gemini_concurrency,
-            tavily_limit=tavily_concurrency,
         )
         self._clock = clock
         self._lock = threading.RLock()

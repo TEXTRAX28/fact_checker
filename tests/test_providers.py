@@ -15,41 +15,30 @@ from providers import (
 
 
 def test_credentials_validate_and_hide_secret_values():
-    credentials = ProviderCredentials.create(
-        "gemini-private-key", "tavily-private-key"
-    )
-    rendered = repr(credentials)
-    assert "gemini-private-key" not in rendered
-    assert "tavily-private-key" not in rendered
-
+    credentials = ProviderCredentials.create("gemini-private-key")
+    assert "gemini-private-key" not in repr(credentials)
     with pytest.raises(InvalidProviderCredentials, match="Gemini"):
-        ProviderCredentials.create("short", "tavily-private-key")
-    with pytest.raises(InvalidProviderCredentials, match="Tavily"):
-        ProviderCredentials.create("gemini-private-key", "bad key")
+        ProviderCredentials.create("short")
 
 
-def test_usage_ledger_is_thread_safe_and_marks_unreported_usage_partial():
+def test_usage_ledger_prices_tool_prompt_and_thinking_tokens_thread_safely():
     ledger = UsageLedger()
 
     def record(index):
         ledger.record_gemini(
             model="model",
-            stage="verification",
-            claim_index=index,
-            attempt=1,
-            usage={
-                "prompt_tokens": 10,
-                "completion_tokens": 2,
-                "total_tokens": 12,
-            },
-            succeeded=True,
-        )
-        ledger.record_tavily(
             stage="search",
             claim_index=index,
             attempt=1,
+            usage={
+                "prompt_token_count": 10,
+                "tool_use_prompt_token_count": 3,
+                "candidates_token_count": 2,
+                "thoughts_token_count": 5,
+                "total_token_count": 17,
+            },
             succeeded=True,
-            search_depth="advanced",
+            search_query_count=2,
         )
 
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -57,9 +46,15 @@ def test_usage_ledger_is_thread_safe_and_marks_unreported_usage_partial():
 
     snapshot = ledger.snapshot()
     assert snapshot["gemini"]["requests"] == 20
-    assert snapshot["gemini"]["total_tokens"] == 240
-    assert snapshot["tavily"]["successful_searches"] == 20
-    assert snapshot["tavily"]["estimated_credits"] == 40
+    assert snapshot["gemini"]["input_tokens"] == 260
+    assert snapshot["gemini"]["output_tokens"] == 140
+    assert snapshot["gemini"]["total_tokens"] == 400
+    assert snapshot["google_search"]["query_count"] == 40
+    assert snapshot["estimated_cost_usd"] == pytest.approx(
+        260 * 0.30 / 1_000_000
+        + 140 * 2.50 / 1_000_000
+        + 40 * 0.014
+    )
     assert snapshot["complete"] is True
 
     ledger.record_gemini(
@@ -72,7 +67,26 @@ def test_usage_ledger_is_thread_safe_and_marks_unreported_usage_partial():
     assert ledger.snapshot()["complete"] is False
 
 
-def test_merge_usage_adds_retry_totals_once():
+def test_usage_estimate_is_partial_when_search_query_metadata_is_missing():
+    ledger = UsageLedger()
+    ledger.record_gemini(
+        model="model",
+        stage="search",
+        claim_index=0,
+        attempt=1,
+        usage={"prompt_token_count": 10, "candidates_token_count": 2},
+        succeeded=True,
+        search_query_count=None,
+    )
+    snapshot = ledger.snapshot()
+    assert snapshot["google_search"]["query_count"] == 0
+    assert snapshot["complete"] is False
+    assert snapshot["pricing"]["model"] == "gemini-3.5-flash-lite"
+    assert snapshot["pricing"]["pricing_date"] == "2026-07"
+    assert snapshot["pricing"]["pricing_url"].startswith("https://ai.google.dev/")
+
+
+def test_merge_usage_adds_retry_totals_and_search_queries_once():
     first = UsageLedger()
     second = UsageLedger()
     first.record_gemini(
@@ -80,54 +94,45 @@ def test_merge_usage_adds_retry_totals_once():
         stage="extraction",
         claim_index=None,
         attempt=1,
-        usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        usage={"prompt_token_count": 10, "candidates_token_count": 5, "total_token_count": 15},
         succeeded=True,
     )
-    second.record_tavily(
+    second.record_gemini(
+        model="model",
         stage="search",
         claim_index=1,
         attempt=1,
+        usage={"prompt_token_count": 8, "candidates_token_count": 4, "total_token_count": 12},
         succeeded=True,
-        search_depth="advanced",
+        search_query_count=2,
     )
 
     merged = merge_usage(first.snapshot(), second.snapshot())
-    assert merged["gemini"]["total_tokens"] == 15
-    assert merged["tavily"]["estimated_credits"] == 2
+    assert merged["gemini"]["total_tokens"] == 27
+    assert merged["google_search"]["query_count"] == 2
+    assert merged["estimated_cost_usd"] > 0.028
     assert merged["complete"] is True
 
 
-def test_provider_contexts_construct_clients_with_their_own_keys(monkeypatch):
+def test_provider_contexts_construct_official_sdk_clients_with_their_own_keys(monkeypatch):
     created_keys = []
 
-    class FakeOpenAI:
+    class FakeClient:
         def __init__(self, *, api_key, **_kwargs):
             created_keys.append(api_key)
 
-    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
-    first = ProviderContext(
-        ProviderCredentials.create("gemini-first-key", "tavily-first-key")
-    )
-    second = ProviderContext(
-        ProviderCredentials.create("gemini-second-key", "tavily-second-key")
-    )
-
+    monkeypatch.setattr("google.genai.Client", FakeClient)
+    contexts = [
+        ProviderContext(ProviderCredentials.create("gemini-first-key")),
+        ProviderContext(ProviderCredentials.create("gemini-second-key")),
+    ]
     with ThreadPoolExecutor(max_workers=2) as pool:
-        list(
-            pool.map(
-                lambda context: context.gemini_client(
-                    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-                    timeout=1,
-                ),
-                [first, second],
-            )
-        )
-
+        list(pool.map(lambda context: context.gemini_client(timeout=1), contexts))
     assert set(created_keys) == {"gemini-first-key", "gemini-second-key"}
 
 
 def test_provider_concurrency_gate_caps_process_wide_work():
-    gate = ProviderConcurrencyGate(gemini_limit=2, tavily_limit=1)
+    gate = ProviderConcurrencyGate(gemini_limit=2)
     lock = threading.Lock()
     active = 0
     peak = 0
@@ -144,41 +149,33 @@ def test_provider_concurrency_gate_caps_process_wide_work():
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(lambda _index: run(), range(12)))
-
     assert peak == 2
 
 
-def test_provider_context_close_drops_credentials_clients_and_callback():
+def test_provider_context_close_drops_credentials_client_and_callback():
     updates = []
 
     class FakeClient:
-        def __init__(self):
-            self.closed = False
+        closed = False
 
         def close(self):
             self.closed = True
 
     context = ProviderContext(
-        ProviderCredentials.create("gemini-private-key", "tavily-private-key"),
+        ProviderCredentials.create("gemini-private-key"),
         on_usage=updates.append,
     )
-    gemini = FakeClient()
-    tavily = FakeClient()
-    context._gemini_client = gemini
-    context._tavily_client = tavily
-
+    client = FakeClient()
+    context._gemini_client = client
     context.close()
-    context.usage.record_tavily(
+    context.usage.record_gemini(
+        model="model",
         stage="search",
         claim_index=0,
         attempt=1,
-        succeeded=True,
-        search_depth="advanced",
+        succeeded=False,
     )
-
     assert context._credentials is None
     assert context._gemini_client is None
-    assert context._tavily_client is None
-    assert gemini.closed is True
-    assert tavily.closed is True
+    assert client.closed is True
     assert updates == []

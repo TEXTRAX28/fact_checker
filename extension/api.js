@@ -42,13 +42,9 @@ export function normalizeHttpUrl(value) {
 export function normalizeProviderCredentials(value = {}) {
   const credentials = {
     geminiKey: String(value.geminiKey || "").trim(),
-    tavilyKey: String(value.tavilyKey || "").trim(),
   };
   if (!validProviderKey(credentials.geminiKey)) {
     throw new ApiError("Enter a valid Gemini API key.", { code: "missing_gemini_key" });
-  }
-  if (!validProviderKey(credentials.tavilyKey)) {
-    throw new ApiError("Enter a valid Tavily API key.", { code: "missing_tavily_key" });
   }
   return credentials;
 }
@@ -63,7 +59,6 @@ function providerHeaders(credentials) {
   const normalized = normalizeProviderCredentials(credentials);
   return {
     "X-Gemini-Key": normalized.geminiKey,
-    "X-Tavily-Key": normalized.tavilyKey,
   };
 }
 

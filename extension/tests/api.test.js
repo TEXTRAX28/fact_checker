@@ -63,16 +63,14 @@ test("buildCheckPayload validates URL and text modes", () => {
   assert.throws(() => buildCheckPayload({ mode: "text", text: "Too short" }), /at least 20/);
 });
 
-test("normalizeProviderCredentials requires both keys without exposing them", () => {
+test("normalizeProviderCredentials requires one Gemini key", () => {
   assert.deepEqual(normalizeProviderCredentials({
     geminiKey: " gemini-test-key ",
-    tavilyKey: " tavily-test-key ",
   }), {
     geminiKey: "gemini-test-key",
-    tavilyKey: "tavily-test-key",
   });
   assert.throws(
-    () => normalizeProviderCredentials({ geminiKey: "short", tavilyKey: "tavily-test-key" }),
+    () => normalizeProviderCredentials({ geminiKey: "short" }),
     /Gemini/,
   );
 });
@@ -93,7 +91,7 @@ test("retryCheckClaim starts only the selected claim retry", async () => {
       "check-1",
       3,
       "job-access-token",
-      { geminiKey: "gemini-test-key", tavilyKey: "tavily-test-key" },
+      { geminiKey: "gemini-test-key" },
       "install-1",
     );
     assert.equal(response.status, "running");
@@ -102,7 +100,10 @@ test("retryCheckClaim starts only the selected claim retry", async () => {
     assert.equal(captured.options.body, undefined);
     assert.equal(captured.options.headers.Authorization, "Bearer job-access-token");
     assert.equal(captured.options.headers["X-Gemini-Key"], "gemini-test-key");
-    assert.equal(captured.options.headers["X-Tavily-Key"], "tavily-test-key");
+    assert.deepEqual(
+      Object.keys(captured.options.headers).filter((key) => key.startsWith("X-")),
+      ["X-Gemini-Key", "X-Client-Id"],
+    );
     assert.equal(captured.options.headers["X-Client-Id"], "install-1");
   } finally {
     globalThis.fetch = originalFetch;

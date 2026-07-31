@@ -15,14 +15,12 @@ VERIFY_WORKERS = 3
 MAX_CLAIMS = 15
 MIN_INPUT_NON_WHITESPACE = 10
 GEMINI_TIMEOUT_SECONDS = 40.0
-TAVILY_TIMEOUT_SECONDS = 15.0
 WHOLE_JOB_DEADLINE_SECONDS = 300.0
 CLAIM_RETRY_DEADLINE_SECONDS = 60.0
 PROVIDER_MAX_RETRIES = 2
 MAX_EVIDENCE_PER_SOURCE_CHARS = 4_000
 MAX_EVIDENCE_TOTAL_CHARS = 10_000
 VERIFY_BACKLOG_MULTIPLIER = 2
-GEMINI_REASONING_EFFORT = "minimal"
 
 _LANGUAGE_MARKERS = {
     "English": frozenset({
@@ -82,13 +80,17 @@ def _is_timeout(exc: Exception) -> bool:
 
 def _status_code(exc: Exception) -> int | None:
     response = getattr(exc, "response", None)
-    return getattr(response, "status_code", None) or getattr(exc, "status_code", None)
+    return (
+        getattr(response, "status_code", None)
+        or getattr(exc, "status_code", None)
+        or getattr(exc, "code", None)
+    )
 
 
 def _is_rate_limited(exc: Exception) -> bool:
     return (_status_code(exc) == 429
             or type(exc).__name__ in {
-                "RateLimitError", "UsageLimitExceededError", "TavilyKeylessLimitError"
+                "RateLimitError", "UsageLimitExceededError"
             })
 
 
@@ -139,7 +141,6 @@ def _public_provider_error(stage: str, exc: Exception,
     return error
 
 MODEL = "gemini-3.5-flash-lite"
-GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 EXTRACT_PROMPT = """Extract up to 15 most specific and verifiable factual claims from the text.
 Return a JSON array. Each item must have:
@@ -215,9 +216,12 @@ Each object in the array must have:
                         "directness": DIRECT if the source addresses the exact entity, number,
                                       and timeframe in the claim; INDIRECT if only generally related
                         "reason": one short sentence
-                        "evidence_excerpt": a short exact quote (under 25 words) from that
-                                            source supporting the stance, or null if the
-                                            stance is IRRELEVANT or INSUFFICIENT
+                        "evidence_excerpt": a short exact quote (under 25 words) from the
+                                            supplied GROUNDED SUMMARY supporting the stance,
+                                            or null if the stance is IRRELEVANT or
+                                            INSUFFICIENT. The supplied text is a
+                                            Gemini-synthesized grounded segment, not a
+                                            verbatim quote from the publisher.
 
 SOURCE_ANALYSIS DEFINITIONS:
   SUPPORTS = this source directly and explicitly confirms the claim.
@@ -380,76 +384,64 @@ VERIFY_RESPONSE_FORMAT = {
 }
 
 
-# Gemini client through Google's OpenAI-compatible endpoint.
-def _read_chat_stream(stream, deadline: float | None) -> tuple[str, object | None]:
-    parts: list[str] = []
-    usage = None
-    for event in stream:
-        if deadline is not None:
-            _remaining_seconds(deadline)
-        event_usage = getattr(event, "usage", None)
-        if event_usage is not None:
-            usage = event_usage
-        choices = getattr(event, "choices", None)
-        if not choices:
-            continue
-        delta = getattr(choices[0], "delta", None)
-        content = getattr(delta, "content", None)
-        if isinstance(content, str):
-            parts.append(content)
-    return "".join(parts), usage
-
-
 def _chat(system: str, user: str, max_tokens: int, *, deadline: float | None = None,
           response_format: dict | None = None,
           provider_context: ProviderContext | None = None,
           stage: str = "unknown", claim_index: int | None = None) -> str:
     providers = provider_context or ProviderContext.from_environment()
     for attempt in range(PROVIDER_MAX_RETRIES + 1):
+        usage_recorded = False
         try:
+            request_timeout = _bounded_timeout(GEMINI_TIMEOUT_SECONDS, deadline)
             slot_timeout = (
-                _bounded_timeout(GEMINI_TIMEOUT_SECONDS, deadline)
+                request_timeout
                 if providers.concurrency_limited
                 else None
             )
             with providers.gemini_slot(slot_timeout):
-                request = {
-                    "model": MODEL,
-                    "max_tokens": max_tokens,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                    "reasoning_effort": GEMINI_REASONING_EFFORT,
-                    "stream": True,
-                    "stream_options": {"include_usage": True},
-                    "timeout": _bounded_timeout(GEMINI_TIMEOUT_SECONDS, deadline),
+                from google.genai import types
+
+                config = {
+                    "system_instruction": system,
+                    "max_output_tokens": max_tokens,
+                    "thinking_config": types.ThinkingConfig(
+                        thinking_level=types.ThinkingLevel.MINIMAL
+                    ),
+                    "http_options": types.HttpOptions(
+                        timeout=max(1, int(request_timeout * 1000)),
+                        retry_options=types.HttpRetryOptions(attempts=1),
+                    ),
                 }
                 if response_format is not None:
-                    request["response_format"] = response_format
-                stream = providers.gemini_client(
-                    base_url=GEMINI_BASE_URL,
+                    config["response_mime_type"] = "application/json"
+                    config["response_json_schema"] = response_format["json_schema"]["schema"]
+                response = providers.gemini_client(
                     timeout=GEMINI_TIMEOUT_SECONDS,
-                ).chat.completions.create(**request)
-                with stream:
-                    content, usage = _read_chat_stream(stream, deadline)
+                ).models.generate_content(
+                    model=MODEL,
+                    contents=user,
+                    config=types.GenerateContentConfig(**config),
+                )
             providers.usage.record_gemini(
                 model=MODEL,
                 stage=stage,
                 claim_index=claim_index,
                 attempt=attempt + 1,
-                usage=usage,
+                usage=getattr(response, "usage_metadata", None),
                 succeeded=True,
             )
-            return content
+            usage_recorded = True
+            _remaining_seconds(deadline)
+            return response.text or ""
         except Exception as exc:
-            providers.usage.record_gemini(
-                model=MODEL,
-                stage=stage,
-                claim_index=claim_index,
-                attempt=attempt + 1,
-                succeeded=False,
-            )
+            if not usage_recorded:
+                providers.usage.record_gemini(
+                    model=MODEL,
+                    stage=stage,
+                    claim_index=claim_index,
+                    attempt=attempt + 1,
+                    succeeded=False,
+                )
             logger.warning(
                 "Gemini attempt %d failed (%s)",
                 attempt + 1,
@@ -529,15 +521,15 @@ _MEDIUM_QUALITY = (
     "wikipedia.org",
 )
 
-# Tavily's own relevance score per result, 0-1. Below this, results tend to be off-topic or thin (song lyrics, wrong-year pages) rather than just low-quality domains.
-_MIN_SCORE = 0.3
-
 def _domain(url: str) -> str:
     from urllib.parse import urlparse
-    netloc = urlparse(url).netloc
-    if netloc.startswith("www."):
-        netloc = netloc[4:]
-    return netloc
+    try:
+        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return ""
+    if hostname.startswith("www."):
+        hostname = hostname[4:]
+    return hostname
 
 def _domain_matches(netloc: str, domain: str) -> bool:
     # Matches the real host, not a substring anywhere in the URL - a query param
@@ -547,7 +539,7 @@ def _domain_matches(netloc: str, domain: str) -> bool:
     return netloc == domain or netloc.endswith("." + domain)
 
 def _filter_sources(results: list[dict]) -> list[dict]:
-    # Social/UGC domains are already excluded upstream via Tavily's exclude_domains. Checks for the high and medium quality
+    # Prefer high-quality domains among the grounded citations that remain after filtering.
     def rank(r):
         netloc = _domain(r["url"])
         for domain in _HIGH_QUALITY:
@@ -561,8 +553,91 @@ def _filter_sources(results: list[dict]) -> list[dict]:
     results.sort(key=rank)
     return results[:3]
 
-def _score(r: dict) -> float:
-    return r.get("score", 0)
+SEARCH_PROMPT = """Search the web for evidence about the factual claim below.
+Return a concise evidence brief containing only facts that the cited web sources actually state.
+Prefer primary, official, academic, and established news sources. Use multiple independent sources
+when available. Do not decide a TRUE/FALSE verdict and do not rely on your training knowledge.
+The separate verification stage will judge the claim using only this grounded evidence.
+
+CLAIM:
+"""
+
+
+def _field(value, name: str, default=None):
+    if isinstance(value, dict):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def _grounding_metadata(response):
+    candidates = _field(response, "candidates", []) or []
+    if not candidates:
+        return None
+    return _field(candidates[0], "grounding_metadata")
+
+
+def _unique_search_query_count(metadata) -> int | None:
+    queries = _field(metadata, "web_search_queries")
+    if queries is None:
+        return None
+    return len({
+        str(query).strip()
+        for query in queries
+        if isinstance(query, str) and query.strip()
+    })
+
+
+def _grounded_sources(response) -> list[dict]:
+    metadata = _grounding_metadata(response)
+    chunks = _field(metadata, "grounding_chunks", []) or []
+    supports = _field(metadata, "grounding_supports", []) or []
+    source_segments: dict[int, list[str]] = {}
+    for support in supports:
+        segment = _field(support, "segment")
+        text = _field(segment, "text", "")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        for index in _field(support, "grounding_chunk_indices", []) or []:
+            if isinstance(index, int):
+                source_segments.setdefault(index, []).append(text.strip())
+
+    results = []
+    seen_urls = set()
+    for index, chunk in enumerate(chunks):
+        web = _field(chunk, "web")
+        url = _field(web, "uri")
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            continue
+        title = _field(web, "title") or None
+        actual_domain = _domain(url)
+        if not actual_domain:
+            continue
+        title_domain = (
+            str(title).strip().lower().removeprefix("www.")
+            if isinstance(title, str) and "." in title and " " not in title
+            else ""
+        )
+        if url in seen_urls or any(
+            _domain_matches(actual_domain, blocked)
+            or (title_domain and _domain_matches(title_domain, blocked))
+            for blocked in _LOW_QUALITY
+        ):
+            continue
+        seen_urls.add(url)
+        segments = list(dict.fromkeys(source_segments.get(index, [])))
+        content = "\n".join(segments).strip()
+        if not content:
+            # A citation without a support-segment mapping is not evidence.
+            continue
+        results.append({
+            "url": url,
+            "title": title,
+            "domain": actual_domain,
+            "content": content,
+            "is_full_content": False,
+            "evidence_kind": "grounded_summary",
+        })
+    return results
 
 def _search(
     query: str,
@@ -570,42 +645,60 @@ def _search(
     provider_context: ProviderContext | None = None,
     claim_index: int | None = None,
 ) -> tuple[str, list[dict]]:
-    # Low-quality/UGC domains excluded at the Tavily, not filtered after the fact check.
     providers = provider_context or ProviderContext.from_environment()
     for attempt in range(PROVIDER_MAX_RETRIES + 1):
+        usage_recorded = False
         try:
+            request_timeout = _bounded_timeout(GEMINI_TIMEOUT_SECONDS, deadline)
             slot_timeout = (
-                _bounded_timeout(TAVILY_TIMEOUT_SECONDS, deadline)
+                request_timeout
                 if providers.concurrency_limited
                 else None
             )
-            with providers.tavily_slot(slot_timeout):
-                response = providers.tavily_client().search(
-                    query,
-                    max_results=10,
-                    exclude_domains=list(_LOW_QUALITY),
-                    search_depth="advanced",
-                    include_raw_content="markdown",
-                    timeout=_bounded_timeout(TAVILY_TIMEOUT_SECONDS, deadline),
+            with providers.gemini_slot(slot_timeout):
+                from google.genai import types
+
+                response = providers.gemini_client(
+                    timeout=GEMINI_TIMEOUT_SECONDS,
+                ).models.generate_content(
+                    model=MODEL,
+                    contents=SEARCH_PROMPT + query,
+                    config=types.GenerateContentConfig(
+                        tools=[types.Tool(google_search=types.GoogleSearch())],
+                        max_output_tokens=1200,
+                        thinking_config=types.ThinkingConfig(
+                            thinking_level=types.ThinkingLevel.MINIMAL
+                        ),
+                        http_options=types.HttpOptions(
+                            timeout=max(1, int(request_timeout * 1000)),
+                            retry_options=types.HttpRetryOptions(attempts=1),
+                        ),
+                    ),
                 )
-            providers.usage.record_tavily(
+            metadata = _grounding_metadata(response)
+            providers.usage.record_gemini(
+                model=MODEL,
                 stage="search",
                 claim_index=claim_index,
                 attempt=attempt + 1,
+                usage=getattr(response, "usage_metadata", None),
                 succeeded=True,
-                search_depth="advanced",
+                search_query_count=_unique_search_query_count(metadata),
             )
+            usage_recorded = True
+            _remaining_seconds(deadline)
             break
         except Exception as exc:
-            providers.usage.record_tavily(
-                stage="search",
-                claim_index=claim_index,
-                attempt=attempt + 1,
-                succeeded=False,
-                search_depth="advanced",
-            )
+            if not usage_recorded:
+                providers.usage.record_gemini(
+                    model=MODEL,
+                    stage="search",
+                    claim_index=claim_index,
+                    attempt=attempt + 1,
+                    succeeded=False,
+                )
             logger.warning(
-                "Tavily attempt %d failed (%s)",
+                "Gemini grounded-search attempt %d failed (%s)",
                 attempt + 1,
                 type(exc).__name__,
             )
@@ -614,14 +707,7 @@ def _search(
                     or not _is_retryable(exc)):
                 raise
             _sleep_before_retry(attempt, deadline)
-    raw_results = response.get("results", [])
-
-    passed = []
-    for r in raw_results:
-        if _score(r) >= _MIN_SCORE:
-            passed.append(r)
-
-    accepted = _filter_sources(passed)
+    accepted = _filter_sources(_grounded_sources(response))
 
     # sources[i] and the "[i] ..." block in the evidence text refer to the same
     # source by construction - this index (not the URL) is what the model is
@@ -632,13 +718,15 @@ def _search(
     evidence_size = 0
     for r in accepted:
         url = r["url"]
-        raw_content = r.get("raw_content")
-        is_full_content = isinstance(raw_content, str) and bool(raw_content.strip())
-        body = raw_content if is_full_content else r.get("content", "")
+        is_full_content = bool(r.get("is_full_content"))
+        body = r.get("content", "")
         if not isinstance(body, str) or not body.strip():
             continue
         index = len(sources)
-        header = f"[{index}] {url}\n"
+        header = (
+            f"[{index}] {url}\n"
+            "GROUNDED SUMMARY (Gemini-synthesized; not a verbatim publisher excerpt):\n"
+        )
         separator_size = 2 if text_parts else 0
         remaining = (MAX_EVIDENCE_TOTAL_CHARS - evidence_size
                      - separator_size - len(header))
@@ -649,9 +737,9 @@ def _search(
             "url": url,
             "title": r.get("title") or None,
             "domain": _domain(url),
-            "score": _score(r),
             "content": excerpt,
             "is_full_content": is_full_content,
+            "evidence_kind": "grounded_summary",
         })
         text_parts.append(header + excerpt)
         evidence_size += separator_size + len(header) + len(excerpt)
@@ -930,14 +1018,10 @@ def _verify_one(claim: dict, search_text: str, sources: list[dict],
     # supported=true while its own source_analysis says every source CONTRADICTS or is
     # IRRELEVANT, and nothing would catch it.
     source_analysis = _validate_source_analysis(verdict.get("source_analysis"), len(sources))
-    if source_analysis:
-        supported, contradicted = _aggregate_stance(source_analysis)
-    else:
-        # Graceful degradation: no usable per-source breakdown (missing, or every entry
-        # was malformed) - fall back to the model's own top-level fields rather than
-        # failing or retrying the whole claim over a partially-malformed response.
-        supported = bool(verdict.get("supported"))
-        contradicted = bool(verdict.get("contradicted"))
+    if not source_analysis:
+        logger.error("Verification response had no valid source_analysis entries.")
+        raise ProviderProtocolError("verification response omitted valid source analysis")
+    supported, contradicted = _aggregate_stance(source_analysis)
 
     for entry in source_analysis:
         source = sources[entry["source_index"]]
@@ -973,7 +1057,7 @@ def _verify_one(claim: dict, search_text: str, sources: list[dict],
     verdict["source_analysis"] = source_analysis
     # extension/state.js::normalizeSource already falls back title -> name -> domain ->
     # "Source N" for object-shaped sources - including domain here means a source with
-    # no Tavily-supplied title shows its domain instead of a generic placeholder.
+    # no grounding-supplied title shows its domain instead of a generic placeholder.
     verdict["sources"] = [
         {"url": s["url"], "title": s.get("title"), "domain": s.get("domain")} for s in sources
     ]

@@ -42,7 +42,7 @@
 <body>
   <main>
     <h1>Fact Check Privacy Policy</h1>
-    <p class="meta">Effective and last updated: 24 July 2026</p>
+    <p class="meta">Effective and last updated: 31 July 2026</p>
 
     <p>This Privacy Policy explains how the Fact Check Chrome extension ("Fact Check") handles information. Fact Check is operated by Natanael Rehuel Santoso ("the developer").</p>
 
@@ -57,19 +57,19 @@
       <li>Readable page text and related article metadata, such as the page URL and title, when the user checks the current page.</li>
       <li>A public article URL when the user chooses URL mode.</li>
       <li>Text entered or pasted by the user when the user chooses text mode.</li>
-      <li>Claims, search queries, evidence excerpts, source links, verdicts, explanations, errors, and other results produced during a check.</li>
+      <li>Claims, search queries, Gemini-synthesized grounded-summary excerpts, source links, verdicts, explanations, errors, and other results produced during a check.</li>
     </ul>
     <p>Submitted content may contain personal or sensitive information if the user includes it. Users should not submit confidential information or information they are not authorized to process.</p>
 
     <h3>Provider credentials</h3>
-    <p>Fact Check uses a bring-your-own-key model. It processes the Gemini API key and Tavily API key entered by the user so that Google and Tavily can authorize the requests the user starts. The keys are not developer-owned credentials.</p>
+    <p>Fact Check uses a bring-your-own-key model. It processes the Gemini API key entered by the user so Google can authorize the requests the user starts. The key is not a developer-owned credential.</p>
 
     <h3>Technical and usage information</h3>
     <ul>
       <li>A randomly generated installation identifier used to apply abuse and rate limits. It is not an account identifier.</li>
       <li>Network information processed by the backend and hosting provider, including an IP address, request time, request path, and ordinary connection metadata.</li>
       <li>A random job capability token used to restrict access to a check while it remains available.</li>
-      <li>Provider-usage information, such as Gemini token counts, Tavily search attempts, and estimated Tavily credits.</li>
+      <li>Provider-usage information, such as Gemini token counts, grounded Google Search query counts, and an <strong>Estimated list-price equivalent (before free quota)</strong>. The pricing basis is Gemini 3.5 Flash-Lite standard pricing dated 2026-07: $0.30 per million input tokens, $2.50 per million output tokens including thinking, and $0.014 per Google Search query after the free allowance. This estimate is not a billing statement; free quota and the user's billing arrangement may make the actual charge different or $0. See the <a href="https://ai.google.dev/gemini-api/docs/pricing" rel="noreferrer">official Gemini API pricing page</a>.</li>
     </ul>
     <p>Fact Check does not use cookies, advertising identifiers, analytics SDKs, or cross-site tracking.</p>
 
@@ -84,14 +84,13 @@
       <li>secure the service, enforce capacity and rate limits, diagnose failures, and prevent abuse; and</li>
       <li>comply with applicable legal obligations.</li>
     </ul>
-    <p>The developer does not use submitted content, browsing activity, provider keys, or results for advertising, credit decisions, data brokerage, or training a developer-owned AI model.</p>
+    <p>The developer does not use submitted content, browsing activity, the Gemini API key, or results for advertising, credit decisions, data brokerage, or training a developer-owned AI model.</p>
 
     <h2>4. Service providers and data transfers</h2>
     <p>Information is sent only to services needed to perform the check:</p>
     <ul>
-      <li><strong>Railway</strong> hosts the backend and therefore processes requests, submitted content, provider-key headers, results held in backend memory, and network metadata. See the <a href="https://railway.com/legal/privacy" rel="noreferrer">Railway Privacy Policy</a>.</li>
-      <li><strong>Google Gemini API</strong> receives submitted text for claim extraction and receives claims and evidence excerpts for verification. The user's Gemini key authorizes these requests. Google's treatment of API data can differ between unpaid and paid services; users should review the <a href="https://ai.google.dev/gemini-api/terms" rel="noreferrer">Gemini API Additional Terms</a> and <a href="https://policies.google.com/privacy" rel="noreferrer">Google Privacy Policy</a>. Google states that content submitted to certain unpaid Gemini services may be used to improve its products and may be reviewed by humans. Do not submit sensitive, confidential, or personal information when using an unpaid service.</li>
-      <li><strong>Tavily</strong> receives claim-derived search queries and the user's Tavily key, and returns candidate web evidence. See the <a href="https://www.tavily.com/privacy" rel="noreferrer">Tavily Privacy Policy</a>.</li>
+      <li><strong>Railway</strong> hosts the backend and therefore processes requests, submitted content, the Gemini API-key header, results held in backend memory, and network metadata. See the <a href="https://railway.com/legal/privacy" rel="noreferrer">Railway Privacy Policy</a>.</li>
+      <li><strong>Google Gemini API and Google Search grounding</strong> receive submitted text for claim extraction, claim-derived search instructions for evidence retrieval, and Gemini-synthesized grounded-summary segments for verification. These segments are tied to the citation mappings returned by Gemini; they are not represented as verbatim publisher excerpts. The user's Gemini key authorizes these requests. Google's treatment of API data can differ between unpaid and paid services; users should review the <a href="https://ai.google.dev/gemini-api/terms" rel="noreferrer">Gemini API Additional Terms</a> and <a href="https://policies.google.com/privacy" rel="noreferrer">Google Privacy Policy</a>. Google states that content submitted to certain unpaid Gemini services may be used to improve its products and may be reviewed by humans. Do not submit sensitive, confidential, or personal information when using an unpaid service.</li>
       <li><strong>Jina AI Reader</strong> receives the public URL entered in URL mode so it can retrieve readable article content. It is not used for pasted-text checks or checks that use page text captured directly by the extension. See <a href="https://jina.ai/legal/" rel="noreferrer">Jina AI Legal Information</a>.</li>
     </ul>
     <p>These providers may process information in countries other than the user's country and apply their own retention, security, and legal terms. Fact Check does not control their independent processing.</p>
@@ -100,20 +99,20 @@
 
     <h3>In Chrome</h3>
     <ul>
-      <li>Provider keys, drafts, captured page data, active-job recovery information, and results are stored in <code>chrome.storage.session</code> for the current Chrome profile. Provider-key storage is restricted to trusted extension contexts. It is cleared when the browser session ends or the extension is reloaded, updated, or disabled. Closing only the side panel does not clear it.</li>
+      <li>The Gemini API key, drafts, captured page data, active-job recovery information, and results are stored in <code>chrome.storage.session</code> for the current Chrome profile. API-key storage is restricted to trusted extension contexts. It is cleared when the browser session ends or the extension is reloaded, updated, or disabled. Closing only the side panel does not clear it.</li>
       <li>The random installation identifier is stored in <code>chrome.storage.local</code> and remains until the extension is removed or its storage is cleared.</li>
       <li>Exports are created only when the user requests them and are saved to the download location selected by Chrome.</li>
     </ul>
-    <p>Chrome extension storage is not a substitute for an encrypted password manager. Users can clear their provider keys from the extension at any time and should revoke a key with Google or Tavily if they believe it has been exposed.</p>
+    <p>Chrome extension storage is not a substitute for an encrypted password manager. Users can clear their Gemini key from the extension at any time and should revoke it through Google AI Studio if they believe it has been exposed.</p>
 
     <h3>In the backend</h3>
     <ul>
       <li>Submitted content is held in process memory while a check runs.</li>
       <li>Job status, claims, evidence, results, errors, and usage totals are held in process memory. They become eligible for removal one hour after the job reaches a final state and are removed during subsequent backend cleanup. A backend restart removes them sooner.</li>
       <li>IP-address and installation-identifier entries are used during the configured short rolling rate-limit window. Stale entries are removed during subsequent backend cleanup, and a backend restart removes them sooner.</li>
-      <li>Provider keys are used only by the job or retry that received them. They are not written to a database, job snapshot, event stream, result export, or application log, and provider-client references are cleared when the operation finishes.</li>
+      <li>The Gemini API key is used only by the job or retry that received it. It is not written to a database, job snapshot, event stream, result export, or application log, and the provider-client reference is cleared when the operation finishes.</li>
     </ul>
-    <p>The hosting provider may retain infrastructure and access logs under its own policy. Fact Check deliberately avoids logging request bodies and provider keys, but no internet service can guarantee that operational metadata will never be retained by its infrastructure provider.</p>
+    <p>The hosting provider may retain infrastructure and access logs under its own policy. Fact Check deliberately avoids logging request bodies and the Gemini API key, but no internet service can guarantee that operational metadata will never be retained by its infrastructure provider.</p>
 
     <h2>6. Sharing, sale, and human access</h2>
     <p>The developer does not sell, rent, trade, or license user information. Information is shared only with the service providers above when necessary to provide the requested fact check, to protect the service from abuse, or when required by law.</p>
@@ -124,7 +123,7 @@
       <li><strong>activeTab</strong> allows access to the page where the user invokes Fact Check.</li>
       <li><strong>scripting</strong> extracts readable page text and locates a checked claim on the open page.</li>
       <li><strong>sidePanel</strong> displays the Fact Check interface.</li>
-      <li><strong>storage</strong> stores temporary session state, provider keys, and the installation identifier described above.</li>
+      <li><strong>storage</strong> stores temporary session state, the Gemini API key, and the installation identifier described above.</li>
       <li><strong>Backend host access</strong> allows encrypted requests to the hosted Fact Check API.</li>
       <li><strong>Optional website access</strong> is requested when the user asks the extension to refresh page content after navigating to another page.</li>
     </ul>
@@ -135,19 +134,19 @@
     <h2>9. User choices and deletion</h2>
     <ul>
       <li>Do not start a check if you do not want the selected content sent to the backend and the applicable providers.</li>
-      <li>Clear provider keys from the key dialog, or fully exit Chrome to end the session.</li>
+      <li>Clear the Gemini API key from the key dialog, or fully exit Chrome to end the session.</li>
       <li>Remove the extension or clear its extension storage to delete the persistent installation identifier.</li>
       <li>Cancel an active check from the side panel. A provider request already in progress may continue until its timeout.</li>
-      <li>Manage or revoke provider keys directly through Google AI Studio and Tavily.</li>
+      <li>Manage or revoke the Gemini key directly through Google AI Studio.</li>
     </ul>
     <p>Fact Check has no user accounts and does not maintain a user database. Backend jobs expire automatically as described above. For privacy questions, 
       email<a href="mailto:natanaelrehuels@gmail.com"> natanaelrehuels@gmail.com</a>.
-      Do not include API keys, passwords, confidential source text, or other
+      Do not include your Gemini API key, passwords, confidential source text, or other
       sensitive information in your email.
     </p>
 
     <h2>10. Children</h2>
-    <p>Fact Check is not directed to children under 18. Google states that users of the Gemini API must be at least 18. Do not use Fact Check if you do not meet the age requirements of the provider services connected through your keys.</p>
+    <p>Fact Check is not directed to children under 18. Google states that users of the Gemini API must be at least 18. Do not use Fact Check if you do not meet the age requirements of the service connected through your key.</p>
 
     <h2>11. Changes to this policy</h2>
     <p>This policy may be updated when Fact Check's data practices, providers, or legal obligations change. The effective date at the top will be updated. Material changes to data practices will also be disclosed through the extension or its Chrome Web Store listing when required.</p>
@@ -159,7 +158,7 @@
     <p>Fact Check is operated by Natanael Rehuel Santoso. For privacy, security, or support questions, contact<a href="mailto:natanaelrehuels@gmail.com"> natanaelrehuels@gmail.com</a></p>
 
     <p>
-      Never include Gemini API keys, Tavily API keys, passwords, or confidential
+      Never include your Gemini API key, passwords, or confidential
       submitted content in an email.
     </p>
   </main>

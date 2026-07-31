@@ -36,8 +36,9 @@ Chrome extension
       v
 api.py -> jobs.py -> service.py -> fact_checker.py
                                       |
-                                      +-> Gemini (claim extraction and verification)
-                                      +-> Tavily (evidence search)
+                                      +-> Gemini 3.5 Flash-Lite
+                                          (claim extraction, grounded Google
+                                           Search, and evidence verification)
 ```
 
 Responsibilities are intentionally separated:
@@ -61,8 +62,8 @@ logic are not duplicated in frontend code.
 2. For URL mode, retrieve readable article content through Jina Reader.
 3. Ask Gemini 3.5 Flash-Lite through Google AI Studio to extract up to 15 factual claims and a
    targeted search query for each claim.
-4. Search Tavily for evidence, excluding configured social and user-generated
-   domains and rejecting low-relevance results.
+4. Ask Gemini to retrieve current evidence with built-in Google Search
+   grounding and return structured citation metadata.
 5. Rank accepted sources and retain up to three evidence sources per claim.
 6. Verify each claim against its own evidence.
 7. Derive `supported` and `contradicted` from per-source analysis, then derive
@@ -81,14 +82,13 @@ results retain their original claim indexes even when they finish out of order.
   self-reported verdict.
 - Evidence and claim counts are bounded.
 - Provider calls have explicit timeouts and bounded retries.
-- Social and user-generated domains such as Facebook, X, Reddit, Medium, and
-  LinkedIn are excluded from Tavily searches.
-- Retrieved source content is bounded before it enters an LLM prompt.
+- Social and user-generated citations such as Facebook, X, Reddit, Medium, and
+  LinkedIn are excluded before grounded evidence enters verification.
+- Gemini-synthesized grounded-summary segments that are bound to citation metadata are bounded before they enter a verification prompt.
 - Provider failures are sanitized before being returned through the API.
-- Provider keys are isolated per job and never enter snapshots, events, or
+- The Gemini API key is isolated per job and never enters snapshots, events, or
   exports.
-- Hosted jobs share explicit process-wide Gemini and Tavily concurrency
-  limits.
+- Hosted jobs share an explicit process-wide Gemini concurrency limit.
 
 ## Requirements
 
@@ -96,7 +96,6 @@ results retain their original claim indexes even when they finish out of order.
 - Chrome 116 or newer
 - Node.js for extension tests and validation
 - A Gemini API key from Google AI Studio
-- A Tavily API key
 
 Runtime dependencies are pinned in `requirements.txt`. Development and test
 dependencies are defined in `requirements-dev.txt`.
@@ -120,11 +119,11 @@ python -m pip install -r requirements-dev.txt
 For runtime-only installation, use `requirements.txt` instead.
 
 The extension uses bring-your-own-key (BYOK). Start the API, open the key button
-in the side panel, and enter the Gemini and Tavily keys that should pay for
-the check. Keys are stored in `chrome.storage.session`, restricted to trusted
+in the side panel, and enter the Gemini key that should pay for the check. The
+key is stored in `chrome.storage.session`, restricted to trusted
 extension contexts, and scoped to the current Chrome profile and browser
 session. Closing Chrome clears them; closing only the side panel does not.
-Separate Chrome profiles do not share these keys.
+Separate Chrome profiles do not share this key.
 
 An `.env` file is optional. It is only a fallback for direct local engine
 diagnostics outside the extension. To use that fallback:
@@ -133,14 +132,13 @@ diagnostics outside the extension. To use that fallback:
 Copy-Item .env.example .env
 ```
 
-Fill in both values in `.env`:
+Fill in the value in `.env`:
 
 ```dotenv
-TAVILY_API_KEY=your_tavily_key
 GEMINI_API_KEY=your_gemini_key
 ```
 
-The real `.env` file is ignored by Git. Do not commit API keys.
+The real `.env` file is ignored by Git. Do not commit the Gemini API key.
 
 ## Run the Extension Locally
 
@@ -174,7 +172,7 @@ connections.
 | `GET` | `/health` | Public | Backend readiness |
 | `GET` | `/privacy` | Public | Privacy policy |
 | `GET` | `/support` | Public | Support information |
-| `POST` | `/v1/checks` | Gemini and Tavily key headers | Create a check |
+| `POST` | `/v1/checks` | Gemini key header | Create a check |
 | `GET` | `/v1/checks/{job_id}` | Job bearer capability | Read the current snapshot |
 | `GET` | `/v1/checks/{job_id}/events` | Job bearer capability | Stream events through SSE |
 | `DELETE` | `/v1/checks/{job_id}` | Job bearer capability | Request cancellation |
@@ -197,11 +195,17 @@ SHA-256 hash. Every later job operation sends the token as
 ## Usage Accounting
 
 The side panel and exports show cumulative Gemini input, output, and total
-tokens plus Tavily search attempts and estimated credits. Gemini values come
-from provider-reported stream metadata. Tavily advanced searches are labeled as
-an estimate of two credits per successful search. A partial marker is shown
-when a provider fails or does not report token usage. Replayed SSE events replace
-cumulative totals instead of adding them again.
+tokens (including tool-use prompt tokens as input and thinking tokens as
+output), the number of grounded Google Search queries reported by the API, and
+an **Estimated list-price equivalent (before free quota)**. The pricing basis is
+Gemini 3.5 Flash-Lite standard pricing dated 2026-07: $0.30 per million input
+tokens, $2.50 per million output tokens including thinking, and $0.014 per
+Google Search query after the free allowance. This is not the user's bill;
+actual charges may differ and free quota may make them $0. See the
+[official Gemini API pricing page](https://ai.google.dev/gemini-api/docs/pricing).
+A partial-estimate marker is shown when Gemini omits token or search-query
+usage metadata. Replayed SSE events replace cumulative totals instead of adding
+them again.
 
 ## Railway Beta Configuration
 
@@ -216,10 +220,9 @@ JOB_MAX_WORKERS=1
 JOB_CAPACITY=8
 JOB_CREATION_RATE_LIMIT=5
 GEMINI_CONCURRENCY=3
-TAVILY_CONCURRENCY=4
 ```
 
-Do not set developer Gemini or Tavily keys on Railway. After Railway assigns
+Do not set a developer Gemini key on Railway. After Railway assigns
 an HTTPS domain, configure the extension and its exact host permission together:
 
 ```powershell

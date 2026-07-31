@@ -1,0 +1,29 @@
+SLIDE 1 — ONE KEY
+Fact Check now completes the full verification workflow with one Google AI Studio key. That one user-supplied Gemini key authorizes claim extraction, grounded web search, and source verification. The second provider credential is gone, but the evidence-first architecture remains.
+
+SLIDE 2 — SEPARATE RESPONSIBILITIES
+Gemini 3.5 Flash-Lite finds and evaluates evidence. Google Search grounding supplies cited web sources. Python derives the final verdict from validated source stances. This separation matters: the system does not trust a confident model-generated TRUE or FALSE label.
+
+SLIDE 3 — ONE GEMINI BYOK KEY
+Users enter one Gemini API key. The extension keeps it in trusted Chrome session storage and sends it only with the job or retry that needs it. The same key powers extraction, Google Search grounding, and verification, so setup is simpler without moving billing responsibility away from the user.
+
+SLIDE 4 — THE PIPELINE
+The workflow has four explicit stages. First, Gemini extracts checkable claims. Second, Google Search grounding retrieves web evidence for each claim. Third, Gemini analyzes each cited source against its claim. Finally, Python applies deterministic rules to derive TRUE, FALSE, or UNVERIFIABLE.
+
+SLIDE 5 — EVIDENCE SAFEGUARDS
+Grounding is treated as evidence, not as permission to reuse an entire AI answer. Only support segments mapped to citation chunks are admitted. They are labeled as Gemini-synthesized grounded summaries, not publisher quotations. Ranking and blocking use the actual parsed hostname, and malformed or unbound citations are skipped.
+
+SLIDE 6 — DETERMINISTIC OUTCOMES
+TRUE requires supporting evidence without contradiction. FALSE requires contradicting evidence without support. Missing, mixed, indirect, or insufficient evidence becomes UNVERIFIABLE. If the model omits valid source analysis, the response is treated as a provider protocol failure instead of trusting top-level booleans.
+
+SLIDE 7 — SECURITY AND LIMITS
+The Gemini key remains session-only and never enters snapshots, events, exports, or application logs. Random bearer capabilities protect later job operations. Request sizes, evidence length, provider concurrency, retries, per-call timeouts, and the whole-job deadline are bounded.
+
+SLIDE 8 — USAGE AND ESTIMATED COST
+The extension shows input tokens, tool-use prompt tokens, output tokens including thinking, and grounded Google Search query count. The display is labeled “Estimated list-price equivalent (before free quota).” For Gemini 3.5 Flash-Lite, the July 2026 list-price basis is $0.30 per million input tokens, $2.50 per million billable output tokens including thinking, and $0.014 per Google Search query after the free allowance. This is not a billing statement. Free quota and the user’s billing arrangement can make the actual charge different or $0. The current source is https://ai.google.dev/gemini-api/docs/pricing.
+
+SLIDE 9 — VERIFIED IMPLEMENTATION
+The current implementation uses the official Google Gen AI SDK, Gemini 3.5 Flash-Lite, and Google Search grounding. The final verification run passed 109 Python tests and 39 extension tests. Extension validation, Python compilation, and the whitespace check also passed. Railway remains the hosted backend target.
+
+SLIDE 10 — CLOSE
+Moving to one key reduces setup friction, but it does not collapse the verification process into one opaque answer. Fact Check still separates extraction, grounded evidence, source verification, and deterministic verdict logic. One key. Evidence first. Verify.

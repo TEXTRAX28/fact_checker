@@ -153,10 +153,11 @@ def _error(stage: str, code: str, *, claim_index: int | None = None) -> dict[str
 def _is_rate_limited(exc: Exception) -> bool:
     response = getattr(exc, "response", None)
     status_code = (getattr(response, "status_code", None)
-                   or getattr(exc, "status_code", None))
+                   or getattr(exc, "status_code", None)
+                   or getattr(exc, "code", None))
     return (status_code == 429
             or type(exc).__name__ in {
-                "RateLimitError", "UsageLimitExceededError", "TavilyKeylessLimitError"
+                "RateLimitError", "UsageLimitExceededError"
             })
 
 

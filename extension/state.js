@@ -57,9 +57,9 @@ function asNumber(value, fallback = 0) {
 
 function normalizeUsage(value = {}, previous = {}) {
   const gemini = value?.gemini || value?.deepinfra || {};
-  const tavily = value?.tavily || {};
+  const googleSearch = value?.google_search || value?.googleSearch || {};
   const previousGemini = previous?.gemini || previous?.deepinfra || {};
-  const previousTavily = previous?.tavily || {};
+  const previousSearch = previous?.googleSearch || {};
   return {
     gemini: {
       requests: Math.max(0, asNumber(firstDefined(
@@ -82,23 +82,58 @@ function normalizeUsage(value = {}, previous = {}) {
       ))),
       complete: Boolean(firstDefined(gemini.complete, previousGemini.complete, true)),
     },
-    tavily: {
-      searchAttempts: Math.max(0, asNumber(firstDefined(
-        tavily.search_attempts, tavily.searchAttempts, previousTavily.searchAttempts, 0,
-      ))),
-      successfulSearches: Math.max(0, asNumber(firstDefined(
-        tavily.successful_searches,
-        tavily.successfulSearches,
-        previousTavily.successfulSearches,
+    googleSearch: {
+      queryCount: Math.max(0, asNumber(firstDefined(
+        googleSearch.query_count,
+        googleSearch.queryCount,
+        previousSearch.queryCount,
         0,
       ))),
-      estimatedCredits: Math.max(0, asNumber(firstDefined(
-        tavily.estimated_credits,
-        tavily.estimatedCredits,
-        previousTavily.estimatedCredits,
-        0,
+    },
+    estimatedCostUsd: Math.max(0, asNumber(firstDefined(
+      value?.estimated_cost_usd,
+      value?.estimatedCostUsd,
+      previous?.estimatedCostUsd,
+      0,
+    ))),
+    pricing: {
+      label: firstDefined(
+        value?.pricing?.label, previous?.pricing?.label,
+        "Estimated list-price equivalent (before free quota)",
+      ),
+      model: firstDefined(
+        value?.pricing?.model, previous?.pricing?.model, "gemini-3.5-flash-lite",
+      ),
+      pricingDate: firstDefined(
+        value?.pricing?.pricing_date,
+        value?.pricing?.pricingDate,
+        previous?.pricing?.pricingDate,
+        "2026-07",
+      ),
+      pricingUrl: firstDefined(
+        value?.pricing?.pricing_url,
+        value?.pricing?.pricingUrl,
+        previous?.pricing?.pricingUrl,
+        "https://ai.google.dev/gemini-api/docs/pricing",
+      ),
+      inputUsdPerMillionTokens: Math.max(0, asNumber(firstDefined(
+        value?.pricing?.input_usd_per_million_tokens,
+        value?.pricing?.inputUsdPerMillionTokens,
+        previous?.pricing?.inputUsdPerMillionTokens,
+        0.30,
       ))),
-      complete: Boolean(firstDefined(tavily.complete, previousTavily.complete, true)),
+      outputUsdPerMillionTokens: Math.max(0, asNumber(firstDefined(
+        value?.pricing?.output_usd_per_million_tokens,
+        value?.pricing?.outputUsdPerMillionTokens,
+        previous?.pricing?.outputUsdPerMillionTokens,
+        2.50,
+      ))),
+      googleSearchUsdPerQuery: Math.max(0, asNumber(firstDefined(
+        value?.pricing?.google_search_usd_per_query,
+        value?.pricing?.googleSearchUsdPerQuery,
+        previous?.pricing?.googleSearchUsdPerQuery,
+        0.014,
+      ))),
     },
     complete: Boolean(firstDefined(value?.complete, previous?.complete, true)),
   };
@@ -539,7 +574,11 @@ export function toMarkdownReport(data) {
   lines.push(`**Exported:** ${data.exportedAt}`);
   lines.push(`**Claims checked:** ${data.summary.completedCount} of ${data.summary.claimCount}`);
   lines.push(`**Gemini tokens:** ${data.summary.usage.gemini.totalTokens}`);
-  lines.push(`**Tavily estimated credits:** ${data.summary.usage.tavily.estimatedCredits}`);
+  lines.push(`**Google Search queries:** ${data.summary.usage.googleSearch.queryCount}`);
+  lines.push(`**Estimated list-price equivalent (before free quota):** $${data.summary.usage.estimatedCostUsd.toFixed(4)}`);
+  lines.push(`**Pricing basis:** ${data.summary.usage.pricing.model}, ${data.summary.usage.pricing.pricingDate}; $${data.summary.usage.pricing.inputUsdPerMillionTokens}/1M input tokens, $${data.summary.usage.pricing.outputUsdPerMillionTokens}/1M output tokens including thinking, $${data.summary.usage.pricing.googleSearchUsdPerQuery}/Google Search query`);
+  lines.push(`**Pricing source:** ${data.summary.usage.pricing.pricingUrl}`);
+  lines.push("**Billing note:** Estimate only; the actual bill may differ and free quota may make it $0.");
   lines.push("");
 
   data.claims.forEach((claim, position) => {

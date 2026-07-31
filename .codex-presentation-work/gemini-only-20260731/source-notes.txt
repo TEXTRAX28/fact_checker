@@ -1,0 +1,19 @@
+Internal sources
+- C:\Users\natan\VSC Code\fact-checker\README.md
+- C:\Users\natan\VSC Code\fact-checker\fact_checker.py
+- C:\Users\natan\VSC Code\fact-checker\providers.py
+- C:\Users\natan\VSC Code\fact-checker\tests
+- C:\Users\natan\VSC Code\fact-checker\extension\tests
+
+External sources
+- Gemini API pricing: https://ai.google.dev/gemini-api/docs/pricing
+- Google Search grounding: https://ai.google.dev/gemini-api/docs/google-search
+
+Pricing basis verified for the deck
+- Model: Gemini 3.5 Flash-Lite
+- Pricing date: 2026-07
+- Input: $0.30 per 1M tokens
+- Billable output including thinking: $2.50 per 1M tokens
+- Google Search: $0.014 per query after the free allowance
+- Display label: Estimated list-price equivalent (before free quota)
+- Actual charges can differ or be $0 because free quota and the user's billing arrangement apply.

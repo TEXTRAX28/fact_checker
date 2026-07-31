@@ -45,7 +45,6 @@ const elements = {
   credentialsClear: document.querySelector("#credentials-clear"),
   credentialsError: document.querySelector("#credentials-error"),
   geminiKey: document.querySelector("#gemini-key"),
-  tavilyKey: document.querySelector("#tavily-key"),
   modeControl: document.querySelector("#mode-control"),
   inputPanel: document.querySelector("#input-panel"),
   inputError: document.querySelector("#input-error"),
@@ -64,7 +63,8 @@ const elements = {
   usageInputTokens: document.querySelector("#usage-input-tokens"),
   usageOutputTokens: document.querySelector("#usage-output-tokens"),
   usageTotalTokens: document.querySelector("#usage-total-tokens"),
-  usageTavilyCredits: document.querySelector("#usage-tavily-credits"),
+  usageSearchQueries: document.querySelector("#usage-search-queries"),
+  usageEstimatedCost: document.querySelector("#usage-estimated-cost"),
   resultsSection: document.querySelector("#results-section"),
   resultsCount: document.querySelector("#results-count"),
   resultsContext: document.querySelector("#results-context"),
@@ -77,7 +77,7 @@ const elements = {
 const app = {
   mode: "page",
   drafts: { url: "", text: "" },
-  credentials: { geminiKey: "", tavilyKey: "" },
+  credentials: { geminiKey: "" },
   installId: "",
   page: null,
   activeTabId: null,
@@ -226,7 +226,6 @@ function hasProviderCredentials() {
 
 function openCredentialsDialog() {
   elements.geminiKey.value = app.credentials.geminiKey || "";
-  elements.tavilyKey.value = app.credentials.tavilyKey || "";
   elements.credentialsError.hidden = true;
   elements.credentialsDialog.showModal();
   elements.geminiKey.focus();
@@ -236,7 +235,6 @@ async function saveCredentials() {
   try {
     app.credentials = normalizeProviderCredentials({
       geminiKey: elements.geminiKey.value,
-      tavilyKey: elements.tavilyKey.value,
     });
     await chrome.storage.session.set({ [STORAGE.credentials]: app.credentials });
     elements.credentialsError.hidden = true;
@@ -244,15 +242,14 @@ async function saveCredentials() {
     app.inputMessage = "";
     render();
   } catch (error) {
-    elements.credentialsError.textContent = error?.message || "Enter valid provider keys.";
+    elements.credentialsError.textContent = error?.message || "Enter a valid Gemini API key.";
     elements.credentialsError.hidden = false;
   }
 }
 
 async function clearCredentials() {
-  app.credentials = { geminiKey: "", tavilyKey: "" };
+  app.credentials = { geminiKey: "" };
   elements.geminiKey.value = "";
-  elements.tavilyKey.value = "";
   await chrome.storage.session.remove(STORAGE.credentials);
   elements.credentialsDialog.close();
   render();
@@ -446,7 +443,7 @@ function renderAction() {
 
   elements.primary.dataset.action = action;
   elements.primary.title = !running && !hasProviderCredentials()
-    ? "Add your Gemini and Tavily API keys first."
+    ? "Add your Gemini API key first."
     : "";
   elements.primaryLabel.textContent = label;
   elements.primaryIcon.replaceChildren(createIcon(iconName, 18));
@@ -472,23 +469,26 @@ function renderBackend() {
   elements.credentialsAction.dataset.status = credentialsReady ? "ready" : "missing";
   elements.credentialsAction.setAttribute(
     "aria-label",
-    credentialsReady ? "Provider API keys configured" : "Provider API keys required",
+    credentialsReady ? "Gemini API key configured" : "Gemini API key required",
   );
 }
 
 function renderUsage() {
   const usage = app.snapshot.usage;
   const gemini = usage?.gemini || {};
-  const tavily = usage?.tavily || {};
-  const hasUsage = Number(gemini.requests || 0) > 0
-    || Number(tavily.searchAttempts || 0) > 0;
+  const hasUsage = Number(gemini.requests || 0) > 0;
   elements.usageSection.hidden = !app.job || !hasUsage;
   if (elements.usageSection.hidden) return;
   elements.usageInputTokens.textContent = Number(gemini.inputTokens || 0).toLocaleString();
   elements.usageOutputTokens.textContent = Number(gemini.outputTokens || 0).toLocaleString();
   elements.usageTotalTokens.textContent = Number(gemini.totalTokens || 0).toLocaleString();
-  elements.usageTavilyCredits.textContent = Number(tavily.estimatedCredits || 0).toLocaleString();
-  elements.usageStatus.textContent = usage.complete ? "Reported" : "Partial";
+  elements.usageSearchQueries.textContent = Number(
+    usage?.googleSearch?.queryCount || 0,
+  ).toLocaleString();
+  elements.usageEstimatedCost.textContent = `$${Number(
+    usage?.estimatedCostUsd || 0,
+  ).toFixed(4)}`;
+  elements.usageStatus.textContent = usage.complete ? "Estimated" : "Partial estimate";
 }
 
 function renderProgress() {

@@ -1,0 +1,596 @@
+{
+  "slideCount": 5,
+  "layoutCount": 12,
+  "masterCount": 1,
+  "slides": [
+    {
+      "index": 0,
+      "id": "y90nupkv",
+      "localElements": 3,
+      "placeholders": [
+        {
+          "name": "title",
+          "type": "title",
+          "text": ""
+        },
+        {
+          "name": "subtitle",
+          "type": "subtitle",
+          "text": ""
+        },
+        {
+          "name": "dateTime",
+          "type": "dateTime",
+          "text": "30/07/2026"
+        },
+        {
+          "name": "footer",
+          "type": "footer",
+          "text": ""
+        },
+        {
+          "name": "slideNumber",
+          "type": "slideNumber",
+          "text": "‹#›"
+        }
+      ]
+    },
+    {
+      "index": 1,
+      "id": "hwbqtkby",
+      "localElements": 1,
+      "placeholders": [
+        {
+          "name": "dateTime",
+          "type": "dateTime",
+          "text": "30/07/2026"
+        },
+        {
+          "name": "footer",
+          "type": "footer",
+          "text": ""
+        },
+        {
+          "name": "slideNumber",
+          "type": "slideNumber",
+          "text": "‹#›"
+        },
+        {
+          "name": "title",
+          "type": "title",
+          "text": "Click to edit Master title style"
+        },
+        {
+          "name": "body",
+          "type": "body",
+          "text": "Click to edit Master text styles\nSecond level\nThird level\nFourth level\nFifth level"
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "id": "ofy9wn61",
+      "localElements": 1,
+      "placeholders": [
+        {
+          "name": "dateTime",
+          "type": "dateTime",
+          "text": "30/07/2026"
+        },
+        {
+          "name": "footer",
+          "type": "footer",
+          "text": ""
+        },
+        {
+          "name": "slideNumber",
+          "type": "slideNumber",
+          "text": "‹#›"
+        },
+        {
+          "name": "title",
+          "type": "title",
+          "text": "Click to edit Master title style"
+        },
+        {
+          "name": "body",
+          "type": "body",
+          "text": "Click to edit Master text styles\nSecond level\nThird level\nFourth level\nFifth level"
+        }
+      ]
+    },
+    {
+      "index": 3,
+      "id": "jyx0ra1s",
+      "localElements": 1,
+      "placeholders": [
+        {
+          "name": "dateTime",
+          "type": "dateTime",
+          "text": "30/07/2026"
+        },
+        {
+          "name": "footer",
+          "type": "footer",
+          "text": ""
+        },
+        {
+          "name": "slideNumber",
+          "type": "slideNumber",
+          "text": "‹#›"
+        },
+        {
+          "name": "title",
+          "type": "title",
+          "text": "Click to edit Master title style"
+        },
+        {
+          "name": "body",
+          "type": "body",
+          "text": "Click to edit Master text styles\nSecond level\nThird level\nFourth level\nFifth level"
+        }
+      ]
+    },
+    {
+      "index": 4,
+      "id": "i107q5of",
+      "localElements": 1,
+      "placeholders": [
+        {
+          "name": "dateTime",
+          "type": "dateTime",
+          "text": "30/07/2026"
+        },
+        {
+          "name": "footer",
+          "type": "footer",
+          "text": ""
+        },
+        {
+          "name": "slideNumber",
+          "type": "slideNumber",
+          "text": "‹#›"
+        },
+        {
+          "name": "title",
+          "type": "title",
+          "text": "Click to edit Master title style"
+        },
+        {
+          "name": "body",
+          "type": "body",
+          "text": "Click to edit Master text styles\nSecond level\nThird level\nFourth level\nFifth level"
+        }
+      ]
+    }
+  ],
+  "layouts": [
+    {
+      "id": "/ppt/slideMasters/slideMaster1.xml",
+      "name": "",
+      "parentLayoutId": "",
+      "placeholders": [
+        {
+          "name": "title",
+          "type": "title",
+          "text": "Click to edit Master title style"
+        },
+        {
+          "name": "body",
+          "type": "body",
+          "text": "Click to edit Master text styles\nSecond level\nThird level\nFourth level\nFifth level"
+        },
+        {
+          "name": "dateTime",
+          "type": "dateTime",
+          "text": "30/07/2026"
+        },
+        {
+          "name": "footer",
+          "type": "footer",
+          "text": ""
+        },
+        {
+          "name": "slideNumber",
+          "type": "slideNumber",
+          "text": "‹#›"
+        }
+      ]
+    },
+    {
+      "id": "/ppt/slideLayouts/slideLayout1.xml",
+      "name": "Title Slide",
+      "parentLayoutId": "/ppt/slideMasters/slideMaster1.xml",
+      "placeholders": [
+        {
+          "name": "title",
+          "type": "title",
+          "text": "Click to edit Master title style"
+        },
+        {
+          "name": "subtitle",
+          "type": "subtitle",
+          "text": "Click to edit Master subtitle style"
+        },
+        {
+          "name": "dateTime",
+          "type": "dateTime",
+          "text": "30/07/2026"
+        },
+        {
+          "name": "footer",
+          "type": "footer",
+          "text": ""
+        },
+        {
+          "name": "slideNumber",
+          "type": "slideNumber",
+          "text": "‹#›"
+        }
+      ]
+    },
+    {
+      "id": "/ppt/slideLayouts/slideLayout2.xml",
+      "name": "Title and Content",
+      "parentLayoutId": "/ppt/slideMasters/slideMaster1.xml",
+      "placeholders": [
+        {
+          "name": "title",
+          "type": "title",
+          "text": "Click to edit Master title style"
+        },
+        {
+          "name": "content placeholder 2",
+          "text": "Click to edit Master text styles\nSecond level\nThird level\nFourth level\nFifth level"
+        },
+        {
+          "name": "dateTime",
+          "type": "dateTime",
+          "text": "30/07/2026"
+        },
+        {
+          "name": "footer",
+          "type": "footer",
+          "text": ""
+        },
+        {
+          "name": "slideNumber",
+          "type": "slideNumber",
+          "text": "‹#›"
+        }
+      ]
+    },
+    {
+      "id": "/ppt/slideLayouts/slideLayout3.xml",
+      "name": "Section Header",
+      "parentLayoutId": "/ppt/slideMasters/slideMaster1.xml",
+      "placeholders": [
+        {
+          "name": "title",
+          "type": "title",
+          "text": "Click to edit Master title style"
+        },
+        {
+          "name": "body",
+          "type": "body",
+          "text": "Click to edit Master text styles"
+        },
+        {
+          "name": "dateTime",
+          "type": "dateTime",
+          "text": "30/07/2026"
+        },
+        {
+          "name": "footer",
+          "type": "footer",
+          "text": ""
+        },
+        {
+          "name": "slideNumber",
+          "type": "slideNumber",
+          "text": "‹#›"
+        }
+      ]
+    },
+    {
+      "id": "/ppt/slideLayouts/slideLayout4.xml",
+      "name": "Two Content",
+      "parentLayoutId": "/ppt/slideMasters/slideMaster1.xml",
+      "placeholders": [
+        {
+          "name": "title",
+          "type": "title",
+          "text": "Click to edit Master title style"
+        },
+        {
+          "name": "content placeholder 2",
+          "text": "Click to edit Master text styles\nSecond level\nThird level\nFourth level\nFifth level"
+        },
+        {
+          "name": "content placeholder 3",
+          "text": "Click to edit Master text styles\nSecond level\nThird level\nFourth level\nFifth level"
+        },
+        {
+          "name": "dateTime",
+          "type": "dateTime",
+          "text": "30/07/2026"
+        },
+        {
+          "name": "footer",
+          "type": "footer",
+          "text": ""
+        },
+        {
+          "name": "slideNumber",
+          "type": "slideNumber",
+          "text": "‹#›"
+        }
+      ]
+    },
+    {
+      "id": "/ppt/slideLayouts/slideLayout5.xml",
+      "name": "Comparison",
+      "parentLayoutId": "/ppt/slideMasters/slideMaster1.xml",
+      "placeholders": [
+        {
+          "name": "title",
+          "type": "title",
+          "text": "Click to edit Master title style"
+        },
+        {
+          "name": "body",
+          "type": "body",
+          "text": "Click to edit Master text styles"
+        },
+        {
+          "name": "content placeholder 3",
+          "text": "Click to edit Master text styles\nSecond level\nThird level\nFourth level\nFifth level"
+        },
+        {
+          "name": "body",
+          "type": "body",
+          "text": "Click to edit Master text styles"
+        },
+        {
+          "name": "content placeholder 5",
+          "text": "Click to edit Master text styles\nSecond level\nThird level\nFourth level\nFifth level"
+        },
+        {
+          "name": "dateTime",
+          "type": "dateTime",
+          "text": "30/07/2026"
+        },
+        {
+          "name": "footer",
+          "type": "footer",
+          "text": ""
+        },
+        {
+          "name": "slideNumber",
+          "type": "slideNumber",
+          "text": "‹#›"
+        }
+      ]
+    },
+    {
+      "id": "/ppt/slideLayouts/slideLayout6.xml",
+      "name": "Title Only",
+      "parentLayoutId": "/ppt/slideMasters/slideMaster1.xml",
+      "placeholders": [
+        {
+          "name": "title",
+          "type": "title",
+          "text": "Click to edit Master title style"
+        },
+        {
+          "name": "dateTime",
+          "type": "dateTime",
+          "text": "30/07/2026"
+        },
+        {
+          "name": "footer",
+          "type": "footer",
+          "text": ""
+        },
+        {
+          "name": "slideNumber",
+          "type": "slideNumber",
+          "text": "‹#›"
+        }
+      ]
+    },
+    {
+      "id": "/ppt/slideLayouts/slideLayout7.xml",
+      "name": "Blank",
+      "parentLayoutId": "/ppt/slideMasters/slideMaster1.xml",
+      "placeholders": [
+        {
+          "name": "dateTime",
+          "type": "dateTime",
+          "text": "30/07/2026"
+        },
+        {
+          "name": "footer",
+          "type": "footer",
+          "text": ""
+        },
+        {
+          "name": "slideNumber",
+          "type": "slideNumber",
+          "text": "‹#›"
+        }
+      ]
+    },
+    {
+      "id": "/ppt/slideLayouts/slideLayout8.xml",
+      "name": "Content with Caption",
+      "parentLayoutId": "/ppt/slideMasters/slideMaster1.xml",
+      "placeholders": [
+        {
+          "name": "title",
+          "type": "title",
+          "text": "Click to edit Master title style"
+        },
+        {
+          "name": "content placeholder 2",
+          "text": "Click to edit Master text styles\nSecond level\nThird level\nFourth level\nFifth level"
+        },
+        {
+          "name": "body",
+          "type": "body",
+          "text": "Click to edit Master text styles"
+        },
+        {
+          "name": "dateTime",
+          "type": "dateTime",
+          "text": "30/07/2026"
+        },
+        {
+          "name": "footer",
+          "type": "footer",
+          "text": ""
+        },
+        {
+          "name": "slideNumber",
+          "type": "slideNumber",
+          "text": "‹#›"
+        }
+      ]
+    },
+    {
+      "id": "/ppt/slideLayouts/slideLayout9.xml",
+      "name": "Picture with Caption",
+      "parentLayoutId": "/ppt/slideMasters/slideMaster1.xml",
+      "placeholders": [
+        {
+          "name": "title",
+          "type": "title",
+          "text": "Click to edit Master title style"
+        },
+        {
+          "name": "picture",
+          "type": "picture",
+          "text": ""
+        },
+        {
+          "name": "body",
+          "type": "body",
+          "text": "Click to edit Master text styles"
+        },
+        {
+          "name": "dateTime",
+          "type": "dateTime",
+          "text": "30/07/2026"
+        },
+        {
+          "name": "footer",
+          "type": "footer",
+          "text": ""
+        },
+        {
+          "name": "slideNumber",
+          "type": "slideNumber",
+          "text": "‹#›"
+        }
+      ]
+    },
+    {
+      "id": "/ppt/slideLayouts/slideLayout10.xml",
+      "name": "Title and Vertical Text",
+      "parentLayoutId": "/ppt/slideMasters/slideMaster1.xml",
+      "placeholders": [
+        {
+          "name": "title",
+          "type": "title",
+          "text": "Click to edit Master title style"
+        },
+        {
+          "name": "body",
+          "type": "body",
+          "text": "Click to edit Master text styles\nSecond level\nThird level\nFourth level\nFifth level"
+        },
+        {
+          "name": "dateTime",
+          "type": "dateTime",
+          "text": "30/07/2026"
+        },
+        {
+          "name": "footer",
+          "type": "footer",
+          "text": ""
+        },
+        {
+          "name": "slideNumber",
+          "type": "slideNumber",
+          "text": "‹#›"
+        }
+      ]
+    },
+    {
+      "id": "/ppt/slideLayouts/slideLayout11.xml",
+      "name": "Vertical Title and Text",
+      "parentLayoutId": "/ppt/slideMasters/slideMaster1.xml",
+      "placeholders": [
+        {
+          "name": "title",
+          "type": "title",
+          "text": "Click to edit Master title style"
+        },
+        {
+          "name": "body",
+          "type": "body",
+          "text": "Click to edit Master text styles\nSecond level\nThird level\nFourth level\nFifth level"
+        },
+        {
+          "name": "dateTime",
+          "type": "dateTime",
+          "text": "30/07/2026"
+        },
+        {
+          "name": "footer",
+          "type": "footer",
+          "text": ""
+        },
+        {
+          "name": "slideNumber",
+          "type": "slideNumber",
+          "text": "‹#›"
+        }
+      ]
+    }
+  ],
+  "masters": [
+    {
+      "id": "/ppt/slideMasters/slideMaster1.xml",
+      "name": "",
+      "elements": null,
+      "placeholders": [
+        {
+          "name": "title",
+          "type": "title",
+          "text": "Click to edit Master title style"
+        },
+        {
+          "name": "body",
+          "type": "body",
+          "text": "Click to edit Master text styles\nSecond level\nThird level\nFourth level\nFifth level"
+        },
+        {
+          "name": "dateTime",
+          "type": "dateTime",
+          "text": "30/07/2026"
+        },
+        {
+          "name": "footer",
+          "type": "footer",
+          "text": ""
+        },
+        {
+          "name": "slideNumber",
+          "type": "slideNumber",
+          "text": "‹#›"
+        }
+      ]
+    }
+  ]
+}

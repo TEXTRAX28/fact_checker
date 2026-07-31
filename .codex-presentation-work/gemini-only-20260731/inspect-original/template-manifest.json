@@ -1,0 +1,162 @@
+{
+  "sourcePptx": "C:\\Users\\natan\\VSC Code\\fact-checker\\Presentation.pptx",
+  "workspace": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731",
+  "outDir": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731\\inspect-original",
+  "generatedAt": "2026-07-31T03:25:32.542Z",
+  "slideCount": 5,
+  "slideArtifacts": [
+    {
+      "slide": 1,
+      "previewPath": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731\\inspect-original\\source-slides\\source-slide-01.png",
+      "previewRelativePath": "inspect-original/source-slides/source-slide-01.png",
+      "layoutPath": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731\\inspect-original\\layouts\\source-slide-01.layout.json",
+      "layoutRelativePath": "inspect-original/layouts/source-slide-01.layout.json"
+    },
+    {
+      "slide": 2,
+      "previewPath": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731\\inspect-original\\source-slides\\source-slide-02.png",
+      "previewRelativePath": "inspect-original/source-slides/source-slide-02.png",
+      "layoutPath": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731\\inspect-original\\layouts\\source-slide-02.layout.json",
+      "layoutRelativePath": "inspect-original/layouts/source-slide-02.layout.json"
+    },
+    {
+      "slide": 3,
+      "previewPath": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731\\inspect-original\\source-slides\\source-slide-03.png",
+      "previewRelativePath": "inspect-original/source-slides/source-slide-03.png",
+      "layoutPath": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731\\inspect-original\\layouts\\source-slide-03.layout.json",
+      "layoutRelativePath": "inspect-original/layouts/source-slide-03.layout.json"
+    },
+    {
+      "slide": 4,
+      "previewPath": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731\\inspect-original\\source-slides\\source-slide-04.png",
+      "previewRelativePath": "inspect-original/source-slides/source-slide-04.png",
+      "layoutPath": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731\\inspect-original\\layouts\\source-slide-04.layout.json",
+      "layoutRelativePath": "inspect-original/layouts/source-slide-04.layout.json"
+    },
+    {
+      "slide": 5,
+      "previewPath": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731\\inspect-original\\source-slides\\source-slide-05.png",
+      "previewRelativePath": "inspect-original/source-slides/source-slide-05.png",
+      "layoutPath": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731\\inspect-original\\layouts\\source-slide-05.layout.json",
+      "layoutRelativePath": "inspect-original/layouts/source-slide-05.layout.json"
+    }
+  ],
+  "inspectPath": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731\\inspect-original\\template-inspect.ndjson",
+  "inspectRelativePath": "inspect-original/template-inspect.ndjson",
+  "inspectTruncated": false,
+  "inspectMetadata": {
+    "revision": "n98or1",
+    "target": {
+      "id": "pr/ghpsya"
+    },
+    "kind": {
+      "requested": "slide,textbox,shape,image,table,chart",
+      "tokens": [
+        "slide",
+        "textbox",
+        "shape",
+        "image",
+        "table",
+        "chart"
+      ]
+    },
+    "include": {
+      "tokens": []
+    },
+    "exclude": {
+      "tokens": []
+    },
+    "notices": []
+  },
+  "extractedMedia": [
+    {
+      "entry": "ppt/media/image1.png",
+      "path": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731\\inspect-original\\assets\\ppt\\media\\image1.png",
+      "relativePath": "inspect-original/assets/ppt/media/image1.png",
+      "bytes": 688650
+    },
+    {
+      "entry": "ppt/media/image3.png",
+      "path": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731\\inspect-original\\assets\\ppt\\media\\image3.png",
+      "relativePath": "inspect-original/assets/ppt/media/image3.png",
+      "bytes": 102717
+    },
+    {
+      "entry": "ppt/media/image2.png",
+      "path": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731\\inspect-original\\assets\\ppt\\media\\image2.png",
+      "relativePath": "inspect-original/assets/ppt/media/image2.png",
+      "bytes": 104862
+    },
+    {
+      "entry": "ppt/media/image5.png",
+      "path": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731\\inspect-original\\assets\\ppt\\media\\image5.png",
+      "relativePath": "inspect-original/assets/ppt/media/image5.png",
+      "bytes": 104724
+    },
+    {
+      "entry": "ppt/media/image4.png",
+      "path": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731\\inspect-original\\assets\\ppt\\media\\image4.png",
+      "relativePath": "inspect-original/assets/ppt/media/image4.png",
+      "bytes": 210704
+    }
+  ],
+  "fonts": [
+    "+mj-cs",
+    "+mj-ea",
+    "+mj-lt",
+    "+mn-cs",
+    "+mn-ea",
+    "+mn-lt",
+    "Angsana New",
+    "Arial",
+    "Calibri",
+    "Calibri Light",
+    "Cordia New",
+    "DaunPenh",
+    "DokChampa",
+    "Ebrima",
+    "Estrangelo Edessa",
+    "Euphemia",
+    "Gautami",
+    "Iskoola Pota",
+    "Javanese Text",
+    "Kalinga",
+    "Kartika",
+    "Latha",
+    "Leelawadee UI",
+    "MV Boli",
+    "Mangal",
+    "Microsoft Himalaya",
+    "Microsoft JhengHei",
+    "Microsoft New Tai Lue",
+    "Microsoft Tai Le",
+    "Microsoft Uighur",
+    "Microsoft Yi Baiti",
+    "Mongolian Baiti",
+    "MoolBoran",
+    "Myanmar Text",
+    "Nirmala UI",
+    "Nyala",
+    "Phagspa",
+    "Plantagenet Cherokee",
+    "Raavi",
+    "Segoe UI",
+    "Shruti",
+    "Sylfaen",
+    "Times New Roman",
+    "Tunga",
+    "Vrinda",
+    "新細明體",
+    "游ゴシック",
+    "游ゴシック Light",
+    "等线",
+    "等线 Light",
+    "맑은 고딕"
+  ],
+  "packageParts": {
+    "mediaCount": 5,
+    "slideXmlCount": 5,
+    "chartCount": 0,
+    "tableSlideCount": 0
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "status": "pass",
+  "checkedAt": "2026-07-31T03:41:46.283Z",
+  "workspace": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731",
+  "finalPptx": "C:\\Users\\natan\\VSC Code\\fact-checker\\Presentation-gemini-only.pptx",
+  "starterPptx": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731\\template-starter.pptx",
+  "mapPath": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731\\template-frame-map.json",
+  "starterLayoutDir": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731\\template-starter-layout",
+  "finalLayoutDir": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731\\final-layout",
+  "editDir": "C:\\Users\\natan\\VSC Code\\fact-checker\\.codex-presentation-work\\gemini-only-20260731",
+  "issueCount": 0,
+  "issues": []
+}

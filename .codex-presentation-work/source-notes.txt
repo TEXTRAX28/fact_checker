@@ -1,0 +1,8 @@
+No external research or externally sourced imagery is used.
+
+Internal assets:
+- extension/icons/icon128.png
+- screenshots/01-check-any-page.png
+- screenshots/04-verdicts-and-sources.png
+
+Visible product claims are grounded in the repository README and implementation.
