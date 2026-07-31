@@ -361,7 +361,7 @@ def test_usage_is_exposed_as_cumulative_public_totals(client, monkeypatch):
     assert "gemini-test-key" not in str(snapshot)
 
 
-def test_manager_environment_defaults_to_one_process_wide_gemini_request(
+def test_manager_environment_defaults_to_three_process_wide_gemini_requests(
     monkeypatch,
 ):
     observed = []
@@ -376,13 +376,13 @@ def test_manager_environment_defaults_to_one_process_wide_gemini_request(
     monkeypatch.setattr(jobs, "ProviderConcurrencyGate", RecordingGate)
     manager = api._manager_from_env()
     try:
-        assert observed == [1]
+        assert observed == [3]
     finally:
         manager.shutdown()
 
     configured_high = jobs.JobManager(gemini_concurrency=9)
     try:
-        assert observed == [1, 1]
+        assert observed == [3, 3]
     finally:
         configured_high.shutdown()
 

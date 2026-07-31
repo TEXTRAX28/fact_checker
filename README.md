@@ -60,7 +60,7 @@ logic are not duplicated in frontend code.
 
 1. Validate and normalize the submitted URL or text.
 2. For URL mode, retrieve readable article content through Jina Reader.
-3. Ask Gemini 3.5 Flash-Lite through Google AI Studio to extract up to 6 factual claims and a
+3. Ask Gemini 3.5 Flash-Lite through Google AI Studio to extract up to 15 factual claims and a
    targeted search query for each claim.
 4. Ask Gemini to retrieve current evidence with built-in Google Search
    grounding and return structured citation metadata.
@@ -207,7 +207,8 @@ A partial-estimate marker is shown when Gemini omits token or search-query
 usage metadata. Replayed SSE events replace cumulative totals instead of adding
 them again.
 
-Gemini requests are serialized process-wide by default. Timeouts, 408/409, and
+Gemini requests use a process-wide concurrency ceiling of three by default.
+Timeouts, 408/409, and
 retryable 5xx failures use bounded exponential backoff with jitter. A 429 is
 never retried automatically: the first 429 opens the job's circuit immediately,
 and a safe numeric `Retry-After` header or structured Google `RetryInfo` delay
@@ -217,8 +218,8 @@ Completed verdicts and usage are retained, while
 unfinished claims are marked for targeted retry. The UI exposes only an
 allowlisted quota category (`RPM`, `TPM`, `daily`, `spend`, or `unknown`) and a
 bounded retry delay—never Google's raw error, project, account, or key details.
-With six extracted claims, the normal worst case is 13 Gemini calls: one
-extraction, six separately grounded searches, and six separate verifications.
+With fifteen extracted claims, the normal worst case is 31 Gemini calls: one
+extraction, fifteen separately grounded searches, and fifteen separate verifications.
 Verification is deliberately not batched because each verdict must remain
 bound to that claim's own grounded sources and `source_analysis` indices.
 
@@ -234,7 +235,7 @@ CORS_ORIGINS=chrome-extension://your_32_character_extension_id
 JOB_MAX_WORKERS=1
 JOB_CAPACITY=8
 JOB_CREATION_RATE_LIMIT=5
-GEMINI_CONCURRENCY=1
+GEMINI_CONCURRENCY=3
 ```
 
 Do not set a developer Gemini key on Railway. After Railway assigns

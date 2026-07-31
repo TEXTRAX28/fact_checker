@@ -204,7 +204,7 @@ class ProviderConcurrencyGate:
             self._gemini.release()
 
 
-_DEFAULT_PROVIDER_GATE = ProviderConcurrencyGate(gemini_limit=1)
+_DEFAULT_PROVIDER_GATE = ProviderConcurrencyGate(gemini_limit=3)
 
 
 def _validate_key(value: str | None, provider: str) -> str:

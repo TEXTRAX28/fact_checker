@@ -190,7 +190,7 @@ def _manager_from_env() -> JobManager:
             "FACT_CHECKER_EVENT_HISTORY",
             "FACT_CHECK_EVENT_HISTORY",
         ),
-        gemini_concurrency=_env_int("GEMINI_CONCURRENCY", 1),
+        gemini_concurrency=_env_int("GEMINI_CONCURRENCY", 3),
     )
 
 

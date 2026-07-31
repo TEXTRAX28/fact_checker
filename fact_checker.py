@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 SEARCH_WORKERS = 4
 VERIFY_WORKERS = 3
-MAX_CLAIMS = 6
+MAX_CLAIMS = 15
 MIN_INPUT_NON_WHITESPACE = 10
 GEMINI_TIMEOUT_SECONDS = 40.0
 WHOLE_JOB_DEADLINE_SECONDS = 300.0
@@ -184,7 +184,7 @@ def _public_provider_error(stage: str, exc: Exception,
 
 MODEL = "gemini-3.5-flash-lite"
 
-EXTRACT_PROMPT = """Extract up to 6 most specific and verifiable factual claims from the text.
+EXTRACT_PROMPT = """Extract up to 15 most specific and verifiable factual claims from the text.
 Return a JSON array. Each item must have:
   "claim": a faithful, self-contained version of the factual claim. Preserve names, numbers,
            units, dates, and the source's wording wherever possible so the claim can still be

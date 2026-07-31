@@ -128,7 +128,7 @@ class JobManager:
         ttl_seconds: float = 3600.0,
         history_limit: int = 256,
         claim_retry_limit: int = 2,
-        gemini_concurrency: int = 1,
+        gemini_concurrency: int = 3,
         clock: Callable[[], float] = time.time,
     ) -> None:
         if (
@@ -148,11 +148,11 @@ class JobManager:
         self.ttl_seconds = ttl_seconds
         self.history_limit = history_limit
         self.claim_retry_limit = claim_retry_limit
-        # The pipeline intentionally supports one actual Gemini request at a
-        # time. Higher configured values are clamped to prevent in-flight work
-        # from succeeding after a sibling opens the 429 circuit.
+        # Restore the original throughput while keeping a bounded process-wide
+        # ceiling. The 429 circuit still prevents new work after a quota error,
+        # and completed in-flight work is drained and retained.
         self._provider_gate = ProviderConcurrencyGate(
-            gemini_limit=2,
+            gemini_limit=min(gemini_concurrency, 3),
         )
         self._clock = clock
         self._lock = threading.RLock()
