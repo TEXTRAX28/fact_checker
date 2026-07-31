@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor as RealThreadPoolExecutor
 from types import SimpleNamespace
 
 import fact_checker
-from providers import ProviderContext, ProviderCredentials
+from providers import ProviderConcurrencyGate, ProviderContext, ProviderCredentials
 
 
 class FakeChatStream:
@@ -1071,5 +1071,271 @@ def test_rate_limit_status_and_errors_are_sanitized(monkeypatch):
         "code": "provider_rate_limited",
         "message": "A provider rate limit was reached.",
         "claim_index": 0,
+        "quota_category": "unknown",
+        "retry_after_seconds": 60,
     }]
     assert "secret" not in str(result.errors)
+
+
+def test_retry_delay_uses_exponential_jitter_and_honors_retry_after(monkeypatch):
+    monkeypatch.setattr(fact_checker.random, "uniform", lambda _low, _high: 0.25)
+    exception = RuntimeError("rate limited")
+    exception.response = SimpleNamespace(
+        status_code=429,
+        headers={"Retry-After": "7"},
+    )
+
+    assert fact_checker._retry_delay_seconds(0, exception) == 7
+    assert fact_checker._retry_delay_seconds(3, RuntimeError("temporary")) == 8.25
+
+
+def test_retry_sleep_applies_the_calculated_delay_without_passing_deadline(
+    monkeypatch,
+):
+    slept = []
+    monkeypatch.setattr(fact_checker.random, "uniform", lambda _low, _high: 0.0)
+    monkeypatch.setattr(fact_checker.time, "sleep", slept.append)
+
+    assert fact_checker._sleep_before_retry(
+        2,
+        time.monotonic() + 10,
+        TimeoutError("temporary"),
+    ) is True
+    assert slept == [4.0]
+
+
+def test_first_rate_limit_stops_new_claim_work_and_marks_all_unfinished_retryable(
+    monkeypatch,
+):
+    providers = fake_provider_context()
+    searched = []
+
+    class RateLimited(Exception):
+        def __init__(self):
+            self.response = SimpleNamespace(status_code=429, headers={"Retry-After": "9"})
+            self.details = {
+                "error": {
+                    "details": [{
+                        "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                        "violations": [{"quotaMetric": "requests_per_minute"}],
+                    }],
+                },
+            }
+            super().__init__("private provider details")
+
+    monkeypatch.setattr(
+        fact_checker, "_chat",
+        lambda *_args, **_kwargs: extraction_payload(6),
+    )
+
+    def rate_limited_search(
+        _query, _deadline, context, claim_index, _cancel_event=None,
+    ):
+        searched.append(claim_index)
+        exception = RateLimited()
+        context.trip_rate_limit(exception)
+        raise exception
+
+    monkeypatch.setattr(fact_checker, "_search", rate_limited_search)
+
+    result = fact_checker.fact_check(
+        "A sufficiently long factual sentence.",
+        search_workers=1,
+        verify_workers=1,
+        provider_context=providers,
+    )
+
+    assert result.status == "rate_limited"
+    assert searched == [0]
+    assert [error["claim_index"] for error in result.errors] == list(range(6))
+    assert all(error["code"] == "provider_rate_limited" for error in result.errors)
+    assert all(error["quota_category"] == "RPM" for error in result.errors)
+    assert all(error["retry_after_seconds"] == 9 for error in result.errors)
+    assert "private" not in str(result.errors)
+
+
+def test_open_rate_limit_circuit_terminates_without_sleep_or_provider_call(
+    monkeypatch,
+):
+    calls = []
+    sleeps = []
+    client = SimpleNamespace(models=SimpleNamespace(
+        generate_content=lambda **_kwargs: calls.append(True),
+    ))
+    providers = fake_provider_context(gemini=client)
+    exception = RuntimeError("private provider details")
+    exception.response = SimpleNamespace(status_code=429, headers={})
+    providers.trip_rate_limit(exception)
+    monkeypatch.setattr(fact_checker.time, "sleep", sleeps.append)
+
+    with __import__("pytest").raises(
+        fact_checker.ProviderRateLimitCircuitOpen
+    ):
+        fact_checker._chat(
+            "system", "user", 12, provider_context=providers,
+        )
+
+    assert calls == []
+    assert sleeps == []
+    assert providers.usage.snapshot()["gemini"]["requests"] == 0
+
+
+def test_first_429_opens_circuit_without_retrying_owner_or_sibling(monkeypatch):
+    calls = 0
+
+    class RateLimited(Exception):
+        def __init__(self):
+            self.response = SimpleNamespace(status_code=429, headers={})
+            self.details = {}
+            super().__init__("private quota details")
+
+    def generate_content(**_kwargs):
+        nonlocal calls
+        calls += 1
+        raise RateLimited()
+
+    providers = fake_provider_context(gemini=SimpleNamespace(
+        models=SimpleNamespace(generate_content=generate_content),
+    ))
+    monkeypatch.setattr(fact_checker.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(fact_checker.random, "uniform", lambda _low, _high: 0)
+
+    with __import__("pytest").raises(RateLimited):
+        fact_checker._chat(
+            "system", "owner", 12, provider_context=providers,
+        )
+    with __import__("pytest").raises(
+        fact_checker.ProviderRateLimitCircuitOpen
+    ):
+        fact_checker._chat(
+            "system", "sibling", 12, provider_context=providers,
+        )
+
+    assert calls == 1
+    assert providers.usage.snapshot()["gemini"]["requests"] == 1
+
+
+def test_cancellation_interrupts_backoff_before_another_provider_call(
+    monkeypatch,
+):
+    calls = 0
+    cancel_event = threading.Event()
+
+    def generate_content(**_kwargs):
+        nonlocal calls
+        calls += 1
+        cancel_event.set()
+        raise TimeoutError("temporary")
+
+    providers = fake_provider_context(gemini=SimpleNamespace(
+        models=SimpleNamespace(generate_content=generate_content),
+    ))
+    with __import__("pytest").raises(fact_checker.ProviderBackoffCancelled):
+        fact_checker._chat(
+            "system",
+            "user",
+            12,
+            provider_context=providers,
+            cancel_event=cancel_event,
+        )
+
+    assert calls == 1
+
+
+def test_cancellation_while_waiting_for_slot_prevents_provider_call():
+    gate = ProviderConcurrencyGate(gemini_limit=1)
+    providers = ProviderContext(
+        ProviderCredentials.create("gemini-test-key"),
+        concurrency_gate=gate,
+    )
+    provider_calls = []
+    providers._gemini_client = SimpleNamespace(models=SimpleNamespace(
+        generate_content=lambda **_kwargs: provider_calls.append(True),
+    ))
+    occupied = threading.Event()
+    release = threading.Event()
+    cancel_event = threading.Event()
+
+    def hold_slot():
+        with gate.gemini_slot(timeout=1):
+            occupied.set()
+            release.wait(1)
+
+    holder = threading.Thread(target=hold_slot)
+    holder.start()
+    assert occupied.wait(1)
+    outcome = []
+
+    def queued_request():
+        try:
+            fact_checker._chat(
+                "system",
+                "queued",
+                12,
+                provider_context=providers,
+                cancel_event=cancel_event,
+            )
+        except Exception as exc:
+            outcome.append(exc)
+
+    queued = threading.Thread(target=queued_request)
+    queued.start()
+    cancel_event.set()
+    release.set()
+    holder.join(timeout=1)
+    queued.join(timeout=1)
+
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], fact_checker.ProviderBackoffCancelled)
+    assert provider_calls == []
+
+
+def test_circuit_preserves_late_grounded_evidence_for_verification_only_retry(
+    monkeypatch,
+):
+    providers = fake_provider_context()
+    evidence_seen = []
+    release_late_search = threading.Event()
+    both_searches_started = threading.Barrier(2)
+
+    class RateLimited(Exception):
+        def __init__(self):
+            self.response = SimpleNamespace(status_code=429, headers={})
+            self.details = {}
+            super().__init__("private quota details")
+
+    monkeypatch.setattr(
+        fact_checker, "_chat",
+        lambda *_args, **_kwargs: extraction_payload(2),
+    )
+
+    def search(_query, _deadline, context, claim_index, _cancel_event=None):
+        both_searches_started.wait(timeout=1)
+        if claim_index == 0:
+            exception = RateLimited()
+            context.trip_rate_limit(exception)
+            release_late_search.set()
+            raise exception
+        assert release_late_search.wait(1)
+        time.sleep(0.01)
+        return "Already-paid grounded evidence.", [one_source()]
+
+    monkeypatch.setattr(fact_checker, "_search", search)
+
+    result = fact_checker.fact_check(
+        "A sufficiently long factual sentence.",
+        search_workers=2,
+        verify_workers=1,
+        provider_context=providers,
+        on_evidence=evidence_seen.append,
+    )
+
+    assert result.status == "rate_limited"
+    assert evidence_seen == [{
+        "claim_index": 1,
+        "search_text": "Already-paid grounded evidence.",
+        "sources": [one_source()],
+    }]
+    error_by_claim = {error["claim_index"]: error for error in result.errors}
+    assert error_by_claim[0]["stage"] == "search"
+    assert error_by_claim[1]["stage"] == "verification"

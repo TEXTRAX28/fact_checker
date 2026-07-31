@@ -8,6 +8,8 @@ import {
   isTerminalState,
   mergeEvent,
   normalizeSnapshot,
+  retryActionCopy,
+  updateRetryCooldown,
   snapshotBelongsToJob,
   snapshotIsStale,
   statusCopy,
@@ -322,6 +324,8 @@ test("normalizeSnapshot retains structured failed-claim retry state", () => {
     stage: "verification",
     code: "provider_timeout",
     message: "A provider request timed out.",
+    quotaCategory: "unknown",
+    retryAfterSeconds: 0,
   }]);
   assert.equal(snapshot.claimManifest[1].claim, "failed claim");
   assert.equal(snapshot.retryingClaimIndex, 1);
@@ -334,6 +338,93 @@ test("normalizeSnapshot retains structured failed-claim retry state", () => {
     outcome: { results: snapshot.results, errors: [], claim_count: 2 },
   }, "terminal");
   assert.equal(terminal.retryingClaimIndex, null);
+});
+
+test("rate-limit UI copy exposes only sanitized quota metadata", () => {
+  const snapshot = normalizeSnapshot({
+    id: "check-quota",
+    status: "rate_limited",
+    claim_count: 1,
+    claim_manifest: [{ claim_index: 0, claim: "unfinished", speaker: "A" }],
+    errors: [{
+      claim_index: 0,
+      stage: "search",
+      code: "provider_rate_limited",
+      message: "A provider rate limit was reached.",
+      quota_category: "TPM",
+      retry_after_seconds: 42,
+      raw_message: "secret project and account",
+    }],
+  });
+
+  assert.deepEqual(snapshot.claimErrors[0], {
+    claimIndex: 0,
+    stage: "search",
+    code: "provider_rate_limited",
+    message: "A provider rate limit was reached.",
+    quotaCategory: "TPM",
+    retryAfterSeconds: 42,
+  });
+  const [, detail] = statusCopy(snapshot);
+  assert.match(detail, /TPM quota/);
+  assert.match(detail, /42 seconds/);
+  assert.doesNotMatch(detail, /secret|project|account/);
+});
+
+test("extraction rate limits retain safe job-level quota details", () => {
+  const snapshot = normalizeSnapshot({
+    id: "check-extraction-quota",
+    status: "rate_limited",
+    errors: [{
+      stage: "extraction",
+      code: "provider_rate_limited",
+      message: "A provider rate limit was reached.",
+      quota_category: "daily",
+      retry_after_seconds: 120,
+      raw_message: "private project details",
+    }],
+  });
+
+  assert.deepEqual(snapshot.jobErrors, [{
+    stage: "extraction",
+    code: "provider_rate_limited",
+    message: "A provider rate limit was reached.",
+    quotaCategory: "daily",
+    retryAfterSeconds: 120,
+  }]);
+  const [, detail] = statusCopy(snapshot);
+  assert.match(detail, /daily quota/);
+  assert.match(detail, /120 seconds/);
+  assert.doesNotMatch(detail, /private|project/);
+});
+
+test("retry action stays disabled and counts down until eligible", () => {
+  assert.deepEqual(retryActionCopy(17), {
+    label: "Retry in 17s",
+    disabled: true,
+    status: "Waiting for Gemini's retry window.",
+  });
+  assert.deepEqual(retryActionCopy(0), {
+    label: "Retry claim",
+    disabled: false,
+    status: "",
+  });
+});
+
+test("a newer 429 occurrence resets the retry cooldown", () => {
+  const first = updateRetryCooldown(null, {
+    jobId: "job-1", claimIndex: 0, sequence: 10, retryAfterSeconds: 60,
+  }, 1_000);
+  const unchanged = updateRetryCooldown(first, {
+    jobId: "job-1", claimIndex: 0, sequence: 10, retryAfterSeconds: 60,
+  }, 20_000);
+  const reset = updateRetryCooldown(first, {
+    jobId: "job-1", claimIndex: 0, sequence: 20, retryAfterSeconds: 60,
+  }, 20_000);
+
+  assert.equal(unchanged.eligibleAtMs, 61_000);
+  assert.equal(reset.eligibleAtMs, 80_000);
+  assert.notEqual(reset.occurrenceId, first.occurrenceId);
 });
 
 test("buildExportData shapes a completed snapshot for export", () => {

@@ -20,7 +20,11 @@ from fact_checker import (
     fact_check,
     retry_claim as retry_fact_claim,
 )
-from providers import ProviderContext
+from providers import (
+    MAX_PUBLIC_RETRY_AFTER_SECONDS,
+    QUOTA_CATEGORIES,
+    ProviderContext,
+)
 
 JINA_TIMEOUT_SECONDS = 12.0
 MAX_ARTICLE_BYTES = 2 * 1024 * 1024
@@ -140,6 +144,18 @@ def _sanitize_error(error: Any) -> dict[str, Any]:
     claim_index = error.get("claim_index")
     if isinstance(claim_index, int) and claim_index >= 0:
         sanitized["claim_index"] = claim_index
+    if code == "provider_rate_limited":
+        category = error.get("quota_category")
+        sanitized["quota_category"] = (
+            category if category in QUOTA_CATEGORIES else "unknown"
+        )
+        retry_after = error.get("retry_after_seconds")
+        if (
+            isinstance(retry_after, int)
+            and not isinstance(retry_after, bool)
+            and 1 <= retry_after <= MAX_PUBLIC_RETRY_AFTER_SECONDS
+        ):
+            sanitized["retry_after_seconds"] = retry_after
     return sanitized
 
 

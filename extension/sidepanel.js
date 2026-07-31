@@ -21,6 +21,8 @@ import {
   isTerminalState,
   mergeEvent,
   normalizeSnapshot,
+  retryActionCopy,
+  updateRetryCooldown,
   snapshotBelongsToJob,
   snapshotIsStale,
   stageIndex,
@@ -88,6 +90,8 @@ const app = {
   reconnectTimer: null,
   pollTimer: null,
   snapshotTimer: null,
+  retryCooldownTimer: null,
+  retryEligibleAt: new Map(),
   refreshInFlight: null,
   cancelPending: false,
   inputMessage: "",
@@ -282,6 +286,7 @@ async function resetActiveJob() {
   // not call this: the previous result stays visible until a new check starts.
   stopTransport();
   app.job = null;
+  app.retryEligibleAt.clear();
   app.snapshot = normalizeSnapshot({ state: "idle" });
   await chrome.storage.session.remove(STORAGE.activeJob);
 }
@@ -414,6 +419,45 @@ function render() {
   renderProgress();
   renderUsage();
   renderResults();
+  scheduleRetryCooldownRender();
+}
+
+function retryCooldownSeconds(claimIndex, error) {
+  if (error?.code !== "provider_rate_limited") return 0;
+  const key = `${app.snapshot.checkId || app.job?.checkId || "job"}:${claimIndex}`;
+  const now = Date.now();
+  const cooldown = updateRetryCooldown(
+    app.retryEligibleAt.get(key),
+    {
+      jobId: app.snapshot.checkId || app.job?.checkId,
+      claimIndex,
+      sequence: app.snapshot.sequence,
+      retryAfterSeconds: error.retryAfterSeconds,
+    },
+    now,
+  );
+  app.retryEligibleAt.set(key, cooldown);
+  return Math.max(0, Math.ceil((cooldown.eligibleAtMs - now) / 1000));
+}
+
+function scheduleRetryCooldownRender() {
+  clearTimeout(app.retryCooldownTimer);
+  app.retryCooldownTimer = null;
+  const activeKeys = new Set((app.snapshot.claimErrors || [])
+    .filter((error) => error.code === "provider_rate_limited")
+    .map((error) => `${app.snapshot.checkId || app.job?.checkId || "job"}:${error.claimIndex}`));
+  for (const key of app.retryEligibleAt.keys()) {
+    if (!activeKeys.has(key)) app.retryEligibleAt.delete(key);
+  }
+  const waiting = (app.snapshot.claimErrors || []).some(
+    (error) => retryCooldownSeconds(error.claimIndex, error) > 0,
+  );
+  if (waiting) {
+    app.retryCooldownTimer = setTimeout(() => {
+      app.retryCooldownTimer = null;
+      render();
+    }, 1000);
+  }
 }
 
 function renderInputMessage() {
@@ -684,22 +728,35 @@ function renderFailedClaim(index, claim, error) {
   const attemptCount = Number(app.snapshot.retryAttempts?.[index] || 0);
   const retryLimit = app.snapshot.claimRetryLimit || 2;
   header.append(label, node("span", "confidence", `Claim ${index + 1}`));
+  let errorDetail = error?.message || "No verdict was produced for this claim.";
+  if (error?.code === "provider_rate_limited") {
+    const category = error.quotaCategory === "unknown"
+      ? "quota"
+      : `${error.quotaCategory} quota`;
+    const retry = error.retryAfterSeconds > 0
+      ? ` Retry after about ${error.retryAfterSeconds} seconds.`
+      : " Retry shortly.";
+    errorDetail = `Gemini's ${category} was reached.${retry}`;
+  }
   card.append(
     header,
     node("h3", "claim-text", claim.claim),
-    node("p", "explanation", error?.message || "No verdict was produced for this claim."),
+    node("p", "explanation", errorDetail),
   );
 
   if (error && isRetryableClaimError(error.code) && attemptCount < retryLimit) {
     const status = node("span", "retry-status");
     const retrying = app.snapshot.retryingClaimIndex === index;
+    const cooldown = retryCooldownSeconds(index, error);
+    const retryCopy = retryActionCopy(cooldown, retrying);
     const button = actionButton(
-      retrying ? "Retrying" : "Retry claim",
+      retryCopy.label,
       "rotate-cw",
       () => void retryFailedClaim(index, status),
     );
     button.classList.add("retry-claim-action");
-    button.disabled = isRunning();
+    button.disabled = isRunning() || retryCopy.disabled;
+    status.textContent = retryCopy.status;
     const actions = node("div", "result-actions");
     actions.append(button, status);
     card.append(actions);
@@ -740,6 +797,7 @@ async function startCheck(forceRefresh) {
     }
 
     stopTransport();
+    app.retryEligibleAt.clear();
     app.job = {
       checkId: response.id,
       snapshotPath: `/v1/checks/${encodeURIComponent(response.id)}`,
@@ -786,6 +844,10 @@ async function requestCancellation() {
 
 async function retryFailedClaim(claimIndex, status) {
   if (!app.job || isRunning()) return;
+  const error = (app.snapshot.claimErrors || []).find(
+    (candidate) => candidate.claimIndex === claimIndex,
+  );
+  if (retryCooldownSeconds(claimIndex, error) > 0) return;
   status.textContent = "Starting retry...";
   try {
     const credentials = normalizeProviderCredentials(app.credentials);

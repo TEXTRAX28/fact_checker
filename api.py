@@ -20,6 +20,7 @@ from jobs import (
     ActiveJobError,
     CapacityError,
     ClaimRetryError,
+    ClaimRetryCooldownError,
     CreationRateLimitError,
     JobManager,
 )
@@ -189,7 +190,7 @@ def _manager_from_env() -> JobManager:
             "FACT_CHECKER_EVENT_HISTORY",
             "FACT_CHECK_EVENT_HISTORY",
         ),
-        gemini_concurrency=_env_int("GEMINI_CONCURRENCY", 3),
+        gemini_concurrency=_env_int("GEMINI_CONCURRENCY", 1),
     )
 
 
@@ -416,6 +417,12 @@ def create_app(manager_factory=_manager_from_env) -> FastAPI:
                 provider_credentials(request),
                 rate_keys=rate_keys,
             )
+        except ClaimRetryCooldownError as exc:
+            raise HTTPException(
+                status_code=429,
+                detail=str(exc),
+                headers={"Retry-After": str(exc.retry_after_seconds)},
+            ) from None
         except (ActiveJobError, ClaimRetryError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
         except CapacityError as exc:

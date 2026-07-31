@@ -307,5 +307,6 @@ def test_service_errors_are_stable_and_do_not_leak_provider_details(monkeypatch)
         "stage": "search",
         "code": "provider_rate_limited",
         "message": "A provider rate limit was reached.",
+        "quota_category": "unknown",
     }]
     assert secret not in str(serialized)

@@ -1,6 +1,7 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +12,7 @@ from providers import (
     ProviderCredentials,
     UsageLedger,
     merge_usage,
+    public_rate_limit_info,
 )
 
 
@@ -150,6 +152,67 @@ def test_provider_concurrency_gate_caps_process_wide_work():
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(lambda _index: run(), range(12)))
     assert peak == 2
+
+
+def test_rate_limit_info_uses_only_structured_quota_metadata_and_safe_delay():
+    exception = RuntimeError("secret project and account details; TPM maybe")
+    exception.response = SimpleNamespace(
+        status_code=429,
+        headers={"Retry-After": "9999"},
+    )
+    exception.details = {
+        "error": {
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                    "violations": [{
+                        "quotaMetric": "generativelanguage.googleapis.com/"
+                        "generate_content_input_tokens_per_minute",
+                    }],
+                },
+                {
+                    "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                    "retryDelay": "42.2s",
+                },
+            ],
+        },
+    }
+
+    info = public_rate_limit_info(exception)
+
+    assert info.category == "TPM"
+    # The explicit header is honored first but remains bounded for public output.
+    assert info.retry_after_seconds == 300
+    assert "secret" not in str(info.to_dict())
+
+
+def test_rate_limit_info_does_not_classify_unstructured_provider_message():
+    exception = RuntimeError("requests per minute for project secret-project")
+    exception.response = SimpleNamespace(status_code=429, headers={})
+    exception.details = {"error": {"message": str(exception)}}
+
+    assert public_rate_limit_info(exception).to_dict() == {
+        "category": "unknown",
+        "retry_after_seconds": 60,
+    }
+
+
+def test_daily_quota_without_retry_metadata_gets_long_bounded_cooldown():
+    exception = RuntimeError("private details")
+    exception.response = SimpleNamespace(status_code=429, headers={})
+    exception.details = {
+        "error": {
+            "details": [{
+                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                "violations": [{"quotaMetric": "requests_per_day"}],
+            }],
+        },
+    }
+
+    assert public_rate_limit_info(exception).to_dict() == {
+        "category": "daily",
+        "retry_after_seconds": 300,
+    }
 
 
 def test_provider_context_close_drops_credentials_client_and_callback():

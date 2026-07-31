@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import math
 import secrets
 import threading
 import time
@@ -49,6 +50,14 @@ class ClaimRetryError(RuntimeError):
     pass
 
 
+class ClaimRetryCooldownError(ClaimRetryError):
+    def __init__(self, retry_after_seconds: int):
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(
+            f"Wait {retry_after_seconds} seconds before retrying this claim."
+        )
+
+
 RETRYABLE_CLAIM_ERROR_CODES = {
     "provider_error",
     "provider_protocol_error",
@@ -91,6 +100,7 @@ class Job:
     evidence_by_claim: dict[int, dict[str, Any]] = field(default_factory=dict)
     retry_attempts: dict[int, int] = field(default_factory=dict)
     retrying_claim_index: int | None = None
+    retry_not_before: dict[int, float] = field(default_factory=dict)
     usage: dict[str, Any] = field(default_factory=dict)
     sequence: int = 0
     cancel_event: threading.Event = field(default_factory=threading.Event)
@@ -118,10 +128,16 @@ class JobManager:
         ttl_seconds: float = 3600.0,
         history_limit: int = 256,
         claim_retry_limit: int = 2,
-        gemini_concurrency: int = 3,
+        gemini_concurrency: int = 1,
         clock: Callable[[], float] = time.time,
     ) -> None:
-        if max_workers < 1 or capacity < 1 or history_limit < 1 or claim_retry_limit < 1:
+        if (
+            max_workers < 1
+            or capacity < 1
+            or history_limit < 1
+            or claim_retry_limit < 1
+            or gemini_concurrency < 1
+        ):
             raise ValueError("Worker, capacity, and history settings must be positive.")
         if rate_limit < 1 or rate_window_seconds <= 0 or ttl_seconds <= 0:
             raise ValueError("Rate and TTL settings must be positive.")
@@ -132,8 +148,11 @@ class JobManager:
         self.ttl_seconds = ttl_seconds
         self.history_limit = history_limit
         self.claim_retry_limit = claim_retry_limit
+        # The pipeline intentionally supports one actual Gemini request at a
+        # time. Higher configured values are clamped to prevent in-flight work
+        # from succeeding after a sibling opens the 429 circuit.
         self._provider_gate = ProviderConcurrencyGate(
-            gemini_limit=gemini_concurrency,
+            gemini_limit=1,
         )
         self._clock = clock
         self._lock = threading.RLock()
@@ -270,6 +289,10 @@ class JobManager:
                     raise ClaimRetryError("This claim did not fail with a retryable provider error.")
                 if job.retry_attempts.get(claim_index, 0) >= self.claim_retry_limit:
                     raise ClaimRetryError("This claim has reached its retry limit.")
+                retry_not_before = job.retry_not_before.get(claim_index, 0.0)
+                retry_after = math.ceil(retry_not_before - now)
+                if retry_after > 0:
+                    raise ClaimRetryCooldownError(retry_after)
 
                 self._record_rate_attempt_locked(normalized_rate_keys, now)
                 job.retry_attempts[claim_index] = job.retry_attempts.get(claim_index, 0) + 1
@@ -494,11 +517,37 @@ class JobManager:
             if isinstance(outcome_dict.get("results"), list):
                 job.results = copy.deepcopy(outcome_dict["results"])
             job.updated_at = self._clock()
+            for error in outcome_dict.get("errors", []):
+                if not isinstance(error, dict):
+                    continue
+                claim_index = error.get("claim_index")
+                retry_after = error.get("retry_after_seconds")
+                if (
+                    error.get("code") == "provider_rate_limited"
+                    and isinstance(claim_index, int)
+                    and isinstance(retry_after, int)
+                    and not isinstance(retry_after, bool)
+                    and retry_after > 0
+                ):
+                    job.retry_not_before[claim_index] = (
+                        job.updated_at + retry_after
+                    )
             failed_verifications = {
                 error.get("claim_index") for error in outcome_dict.get("errors", [])
                 if isinstance(error, dict) and error.get("stage") == "verification"
                 and isinstance(error.get("claim_index"), int)
             }
+            for error in outcome_dict.get("errors", []):
+                claim_index = error.get("claim_index") if isinstance(error, dict) else None
+                if (
+                    isinstance(claim_index, int)
+                    and claim_index >= 0
+                    and claim_index not in {
+                        result.get("claim_index") for result in job.results
+                        if isinstance(result, dict)
+                    }
+                ):
+                    job.claim_progress[claim_index] = "failed"
             job.evidence_by_claim = {
                 index: evidence for index, evidence in job.evidence_by_claim.items()
                 if index in failed_verifications
@@ -604,6 +653,7 @@ class JobManager:
                 job.results.append(verdict)
                 job.results.sort(key=lambda value: value.get("claim_index", 0))
                 job.claim_progress[claim_index] = "complete"
+                job.retry_not_before.pop(claim_index, None)
                 self._append_event(job, "result", verdict)
                 errors = previous_errors
             elif outcome.get("status") == "cancelled":
@@ -613,6 +663,18 @@ class JobManager:
                     error for error in previous.get("errors", [])
                     if isinstance(error, dict) and error.get("claim_index") == claim_index
                 ])
+                rate_limit_error = next((
+                    error for error in retry_errors
+                    if error.get("code") == "provider_rate_limited"
+                    and isinstance(error.get("retry_after_seconds"), int)
+                    and error.get("retry_after_seconds") > 0
+                ), None)
+                if rate_limit_error is not None:
+                    job.retry_not_before[claim_index] = (
+                        self._clock() + rate_limit_error["retry_after_seconds"]
+                    )
+                else:
+                    job.retry_not_before.pop(claim_index, None)
 
             claim_count = len(job.claims)
             completed_count = len(job.results)
@@ -676,6 +738,17 @@ class JobManager:
             return self._snapshot_locked(job)
 
     def _snapshot_locked(self, job: Job) -> dict[str, Any]:
+        errors = copy.deepcopy((job.outcome or {}).get("errors", []))
+        now = self._clock()
+        for error in errors:
+            claim_index = error.get("claim_index") if isinstance(error, dict) else None
+            if not isinstance(claim_index, int):
+                continue
+            retry_after = math.ceil(job.retry_not_before.get(claim_index, 0.0) - now)
+            if retry_after > 0:
+                error["retry_after_seconds"] = retry_after
+            else:
+                error.pop("retry_after_seconds", None)
         snapshot = {
             "id": job.id,
             "type": job.kind,
@@ -687,7 +760,7 @@ class JobManager:
             "results": copy.deepcopy(job.results),
             "claim_count": ((job.outcome or {}).get("claim_count")
                             if job.outcome is not None else len(job.claims)),
-            "errors": copy.deepcopy((job.outcome or {}).get("errors", [])),
+            "errors": errors,
             "claim_manifest": [
                 {
                     "claim_index": index,

@@ -2,22 +2,32 @@
 import copy
 import difflib
 import logging
+import random
 import re
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
-from providers import ProviderContext
+from providers import (
+    MAX_PUBLIC_RETRY_AFTER_SECONDS,
+    ProviderContext,
+    ProviderRateLimitCircuitOpen,
+    RateLimitInfo,
+    public_rate_limit_info,
+)
 
 logger = logging.getLogger(__name__)
 
 SEARCH_WORKERS = 4
 VERIFY_WORKERS = 3
-MAX_CLAIMS = 15
+MAX_CLAIMS = 6
 MIN_INPUT_NON_WHITESPACE = 10
 GEMINI_TIMEOUT_SECONDS = 40.0
 WHOLE_JOB_DEADLINE_SECONDS = 300.0
 CLAIM_RETRY_DEADLINE_SECONDS = 60.0
-PROVIDER_MAX_RETRIES = 2
+PROVIDER_MAX_RETRIES = 3
+PROVIDER_RETRY_INITIAL_SECONDS = 1.0
+PROVIDER_RETRY_MAX_SECONDS = 8.0
+PROVIDER_RETRY_JITTER_SECONDS = 0.5
 MAX_EVIDENCE_PER_SOURCE_CHARS = 4_000
 MAX_EVIDENCE_TOTAL_CHARS = 10_000
 VERIFY_BACKLOG_MULTIPLIER = 2
@@ -50,6 +60,10 @@ class ProviderProtocolError(Exception):
 
 class WholeJobDeadlineExceeded(TimeoutError):
     """Raised when the complete fact-check has exhausted its wall-clock budget."""
+
+
+class ProviderBackoffCancelled(RuntimeError):
+    """Raised when cancellation interrupts a provider retry delay."""
 
 
 class FactCheckResult(list):
@@ -115,12 +129,35 @@ def _bounded_timeout(limit: float, deadline: float | None) -> float:
     return limit if remaining is None else min(limit, remaining)
 
 
-def _sleep_before_retry(attempt: int, deadline: float | None) -> None:
-    delay = 0.1 * (attempt + 1)
+def _retry_delay_seconds(attempt: int, exc: Exception) -> float:
+    exponential = min(
+        PROVIDER_RETRY_MAX_SECONDS,
+        PROVIDER_RETRY_INITIAL_SECONDS * (2 ** max(0, attempt)),
+    )
+    fallback = exponential + random.uniform(0.0, PROVIDER_RETRY_JITTER_SECONDS)
+    provider_delay = (
+        public_rate_limit_info(exc).retry_after_seconds
+        if _is_rate_limited(exc) else None
+    )
+    return min(
+        MAX_PUBLIC_RETRY_AFTER_SECONDS,
+        max(fallback, float(provider_delay or 0)),
+    )
+
+
+def _sleep_before_retry(
+    attempt: int, deadline: float | None, exc: Exception, cancel_event=None
+) -> bool:
+    delay = _retry_delay_seconds(attempt, exc)
     remaining = _remaining_seconds(deadline)
     if remaining is not None and remaining <= delay:
-        raise WholeJobDeadlineExceeded("The fact-check exceeded its time limit.")
-    time.sleep(delay)
+        return False
+    if cancel_event is not None:
+        if cancel_event.wait(delay):
+            raise ProviderBackoffCancelled("Provider retry was cancelled.")
+    else:
+        time.sleep(delay)
+    return True
 
 
 def _public_provider_error(stage: str, exc: Exception,
@@ -138,11 +175,16 @@ def _public_provider_error(stage: str, exc: Exception,
     error = {"stage": stage, "code": code, "message": message}
     if claim_index is not None:
         error["claim_index"] = claim_index
+    if code == "provider_rate_limited":
+        info = public_rate_limit_info(exc)
+        error["quota_category"] = info.category
+        if info.retry_after_seconds is not None:
+            error["retry_after_seconds"] = info.retry_after_seconds
     return error
 
 MODEL = "gemini-3.5-flash-lite"
 
-EXTRACT_PROMPT = """Extract up to 15 most specific and verifiable factual claims from the text.
+EXTRACT_PROMPT = """Extract up to 6 most specific and verifiable factual claims from the text.
 Return a JSON array. Each item must have:
   "claim": a faithful, self-contained version of the factual claim. Preserve names, numbers,
            units, dates, and the source's wording wherever possible so the claim can still be
@@ -387,11 +429,15 @@ VERIFY_RESPONSE_FORMAT = {
 def _chat(system: str, user: str, max_tokens: int, *, deadline: float | None = None,
           response_format: dict | None = None,
           provider_context: ProviderContext | None = None,
-          stage: str = "unknown", claim_index: int | None = None) -> str:
+          stage: str = "unknown", claim_index: int | None = None,
+          cancel_event=None) -> str:
     providers = provider_context or ProviderContext.from_environment()
     for attempt in range(PROVIDER_MAX_RETRIES + 1):
         usage_recorded = False
         try:
+            if cancel_event is not None and cancel_event.is_set():
+                raise ProviderBackoffCancelled("Provider request was cancelled.")
+            providers.raise_if_rate_limited()
             request_timeout = _bounded_timeout(GEMINI_TIMEOUT_SECONDS, deadline)
             slot_timeout = (
                 request_timeout
@@ -399,6 +445,9 @@ def _chat(system: str, user: str, max_tokens: int, *, deadline: float | None = N
                 else None
             )
             with providers.gemini_slot(slot_timeout):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ProviderBackoffCancelled("Provider request was cancelled.")
+                providers.raise_if_rate_limited()
                 from google.genai import types
 
                 config = {
@@ -434,7 +483,24 @@ def _chat(system: str, user: str, max_tokens: int, *, deadline: float | None = N
             _remaining_seconds(deadline)
             return response.text or ""
         except Exception as exc:
-            if not usage_recorded:
+            if isinstance(exc, (ProviderRateLimitCircuitOpen, ProviderBackoffCancelled)):
+                raise
+            if (
+                _is_rate_limited(exc)
+            ):
+                providers.trip_rate_limit(exc)
+                if not usage_recorded:
+                    providers.usage.record_gemini(
+                        model=MODEL,
+                        stage=stage,
+                        claim_index=claim_index,
+                        attempt=attempt + 1,
+                        succeeded=False,
+                    )
+                raise
+            if not usage_recorded and not isinstance(
+                exc, ProviderRateLimitCircuitOpen
+            ):
                 providers.usage.record_gemini(
                     model=MODEL,
                     stage=stage,
@@ -451,7 +517,12 @@ def _chat(system: str, user: str, max_tokens: int, *, deadline: float | None = N
                     or attempt >= PROVIDER_MAX_RETRIES
                     or not _is_retryable(exc)):
                 raise
-            _sleep_before_retry(attempt, deadline)
+            if not _sleep_before_retry(attempt, deadline, exc, cancel_event):
+                if not _is_rate_limited(exc):
+                    raise WholeJobDeadlineExceeded(
+                        "The fact-check exceeded its time limit."
+                    ) from exc
+                raise
     raise AssertionError("Gemini retry loop exhausted without returning or raising.")
 
 def _parse_provider_array(text: str) -> tuple[list, bool]:
@@ -644,11 +715,15 @@ def _search(
     deadline: float | None = None,
     provider_context: ProviderContext | None = None,
     claim_index: int | None = None,
+    cancel_event=None,
 ) -> tuple[str, list[dict]]:
     providers = provider_context or ProviderContext.from_environment()
     for attempt in range(PROVIDER_MAX_RETRIES + 1):
         usage_recorded = False
         try:
+            if cancel_event is not None and cancel_event.is_set():
+                raise ProviderBackoffCancelled("Provider request was cancelled.")
+            providers.raise_if_rate_limited()
             request_timeout = _bounded_timeout(GEMINI_TIMEOUT_SECONDS, deadline)
             slot_timeout = (
                 request_timeout
@@ -656,6 +731,9 @@ def _search(
                 else None
             )
             with providers.gemini_slot(slot_timeout):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ProviderBackoffCancelled("Provider request was cancelled.")
+                providers.raise_if_rate_limited()
                 from google.genai import types
 
                 response = providers.gemini_client(
@@ -689,7 +767,24 @@ def _search(
             _remaining_seconds(deadline)
             break
         except Exception as exc:
-            if not usage_recorded:
+            if isinstance(exc, (ProviderRateLimitCircuitOpen, ProviderBackoffCancelled)):
+                raise
+            if (
+                _is_rate_limited(exc)
+            ):
+                providers.trip_rate_limit(exc)
+                if not usage_recorded:
+                    providers.usage.record_gemini(
+                        model=MODEL,
+                        stage="search",
+                        claim_index=claim_index,
+                        attempt=attempt + 1,
+                        succeeded=False,
+                    )
+                raise
+            if not usage_recorded and not isinstance(
+                exc, ProviderRateLimitCircuitOpen
+            ):
                 providers.usage.record_gemini(
                     model=MODEL,
                     stage="search",
@@ -706,7 +801,12 @@ def _search(
                     or attempt >= PROVIDER_MAX_RETRIES
                     or not _is_retryable(exc)):
                 raise
-            _sleep_before_retry(attempt, deadline)
+            if not _sleep_before_retry(attempt, deadline, exc, cancel_event):
+                if not _is_rate_limited(exc):
+                    raise WholeJobDeadlineExceeded(
+                        "The fact-check exceeded its time limit."
+                    ) from exc
+                raise
     accepted = _filter_sources(_grounded_sources(response))
 
     # sources[i] and the "[i] ..." block in the evidence text refer to the same
@@ -956,7 +1056,8 @@ def _verify_one(claim: dict, search_text: str, sources: list[dict],
                  deadline: float | None = None,
                  document_language: str | None = None,
                  provider_context: ProviderContext | None = None,
-                 claim_index: int | None = None) -> dict | None:
+                 claim_index: int | None = None,
+                 cancel_event=None) -> dict | None:
     # One verify call per claim: keeps each verdict paired with its own search results (no positional zip drift) and lets callers reveal results as they land.
     if not search_text:
         # No search evidence at all (search failed or returned zero usable sources). Do not
@@ -988,6 +1089,7 @@ def _verify_one(claim: dict, search_text: str, sources: list[dict],
         provider_context=provider_context,
         stage="verification",
         claim_index=claim_index,
+        cancel_event=cancel_event,
     )
     raw_items, protocol_valid = _parse_provider_array(raw_reply)
     if not protocol_valid:
@@ -1162,8 +1264,11 @@ def fact_check(transcript: str, on_result=None, *, on_progress=None,
             response_format=EXTRACT_RESPONSE_FORMAT,
             provider_context=providers,
             stage="extraction",
+            cancel_event=cancel_event,
         )
     except Exception as exc:
+        if cancelled() or isinstance(exc, ProviderBackoffCancelled):
+            return finish("cancelled")
         logger.warning("Claim extraction failed (%s)", type(exc).__name__)
         errors.append(_public_provider_error("extraction", exc))
         if _is_rate_limited(exc):
@@ -1191,6 +1296,13 @@ def fact_check(transcript: str, on_result=None, *, on_progress=None,
     _safe_callback(on_claims, [dict(claim) for claim in claims], "Claims")
     if not claims:
         return finish("no_claims")
+    if providers.rate_limit_info is not None:
+        circuit_error = ProviderRateLimitCircuitOpen(providers.rate_limit_info)
+        errors.extend(
+            _public_provider_error("search", circuit_error, claim_index)
+            for claim_index in range(len(claims))
+        )
+        return finish("rate_limited", claim_count=len(claims))
     if deadline_expired():
         report_deadline()
         return finish("timeout", claim_count=len(claims))
@@ -1216,6 +1328,8 @@ def fact_check(transcript: str, on_result=None, *, on_progress=None,
     dropped_count = 0
     was_cancelled = False
     deadline_reached = False
+    rate_limit_triggered = False
+    retry_stage_by_index: dict[int, str] = {}
 
     def record_error(stage: str, claim_index: int, exc: Exception) -> None:
         nonlocal failed_count, timeout_count, rate_limited_count
@@ -1230,7 +1344,9 @@ def fact_check(transcript: str, on_result=None, *, on_progress=None,
 
     def submit_searches() -> None:
         nonlocal next_search
-        while (not cancelled() and not deadline_expired() and next_search < len(claims)
+        while (not cancelled() and not deadline_expired()
+               and providers.rate_limit_info is None
+               and next_search < len(claims)
                and len(search_futures) < search_limit
                and (len(search_futures) + len(verify_futures)
                     + len(pending_verifications)) < verify_backlog_limit):
@@ -1240,12 +1356,15 @@ def fact_check(transcript: str, on_result=None, *, on_progress=None,
                      claim_count=len(claims))
             future = search_pool.submit(
                 _search, claim["query"], deadline, providers, claim_index,
+                cancel_event,
             )
             search_futures[future] = claim_index
             next_search += 1
 
     def submit_verifications() -> None:
-        while (not cancelled() and not deadline_expired() and pending_verifications
+        while (not cancelled() and not deadline_expired()
+               and providers.rate_limit_info is None
+               and pending_verifications
                and len(verify_futures) < verify_backlog_limit):
             claim_index, search_text, sources = pending_verifications.pop(0)
             progress("verifying", state="started", claim_index=claim_index,
@@ -1255,6 +1374,7 @@ def fact_check(transcript: str, on_result=None, *, on_progress=None,
             future = verify_pool.submit(
                 _verify_one, claims[claim_index], search_text, sources,
                 deadline, document_language, providers, claim_index,
+                cancel_event,
             )
             verify_futures[future] = claim_index
 
@@ -1264,6 +1384,11 @@ def fact_check(transcript: str, on_result=None, *, on_progress=None,
                or verify_futures or pending_verifications):
             if cancelled():
                 was_cancelled = True
+                break
+            if providers.rate_limit_info is not None and not (
+                search_futures or verify_futures
+            ):
+                rate_limit_triggered = True
                 break
 
             submit_verifications()
@@ -1305,6 +1430,10 @@ def fact_check(transcript: str, on_result=None, *, on_progress=None,
                             was_cancelled = True
                             break
                         record_error("search", claim_index, exc)
+                        if _is_rate_limited(exc):
+                            retry_stage_by_index[claim_index] = "search"
+                            rate_limit_triggered = True
+                            break
                     else:
                         if cancelled():
                             was_cancelled = True
@@ -1358,6 +1487,10 @@ def fact_check(transcript: str, on_result=None, *, on_progress=None,
                         was_cancelled = True
                         break
                     record_error("verification", claim_index, exc)
+                    if _is_rate_limited(exc):
+                        retry_stage_by_index[claim_index] = "verification"
+                        rate_limit_triggered = True
+                        break
                     submit_searches()
                     continue
 
@@ -1380,10 +1513,24 @@ def fact_check(transcript: str, on_result=None, *, on_progress=None,
                 if not cancelled():
                     _safe_callback(on_result, verdict, "Result")
                 submit_searches()
-            if deadline_reached:
+            if deadline_reached or rate_limit_triggered:
                 break
     finally:
-        if was_cancelled or cancelled() or deadline_reached:
+        if rate_limit_triggered:
+            for claim_index in search_futures.values():
+                retry_stage_by_index.setdefault(claim_index, "search")
+            for claim_index in verify_futures.values():
+                retry_stage_by_index.setdefault(claim_index, "verification")
+            for claim_index, _search_text, _sources in pending_verifications:
+                retry_stage_by_index.setdefault(claim_index, "verification")
+            for claim_index in range(next_search, len(claims)):
+                retry_stage_by_index.setdefault(claim_index, "search")
+            for future in list(search_futures) + list(verify_futures):
+                future.cancel()
+            pending_verifications.clear()
+            search_pool.shutdown(wait=True, cancel_futures=True)
+            verify_pool.shutdown(wait=True, cancel_futures=True)
+        elif was_cancelled or cancelled() or deadline_reached:
             was_cancelled = True
             for future in list(search_futures) + list(verify_futures):
                 future.cancel()
@@ -1393,6 +1540,75 @@ def fact_check(transcript: str, on_result=None, *, on_progress=None,
         else:
             search_pool.shutdown(wait=True, cancel_futures=True)
             verify_pool.shutdown(wait=True, cancel_futures=True)
+
+    if rate_limit_triggered:
+        # A request already in flight when the circuit opened may still finish.
+        # Consume that paid work after shutdown: grounded search evidence is
+        # retained for a verification-only targeted retry, and completed
+        # verification verdicts are published instead of being charged twice.
+        completed_indices = {
+            result.get("claim_index") for result in results
+            if isinstance(result, dict) and isinstance(result.get("claim_index"), int)
+        }
+        for future, claim_index in list(search_futures.items()):
+            if claim_index in completed_indices or future.cancelled():
+                continue
+            try:
+                search_text, sources = future.result()
+            except Exception:
+                continue
+            if search_text:
+                _safe_callback(on_evidence, {
+                    "claim_index": claim_index,
+                    "search_text": search_text,
+                    "sources": sources,
+                }, "Evidence")
+                retry_stage_by_index[claim_index] = "verification"
+            else:
+                verdict = _no_evidence_verdict(
+                    claims[claim_index], claim_index, document_language
+                )
+                results.append(verdict)
+                completed_indices.add(claim_index)
+                _safe_callback(on_result, verdict, "Result")
+        for future, claim_index in list(verify_futures.items()):
+            if claim_index in completed_indices or future.cancelled():
+                continue
+            try:
+                verdict = future.result()
+            except Exception:
+                continue
+            if verdict is None:
+                continue
+            verdict["claim"] = claims[claim_index]["claim"]
+            verdict["speaker"] = claims[claim_index].get("speaker", "UNKNOWN")
+            verdict["claim_index"] = claim_index
+            results.append(verdict)
+            completed_indices.add(claim_index)
+            _safe_callback(on_result, verdict, "Result")
+
+        existing_rate_limit_indices = {
+            error.get("claim_index") for error in errors
+            if error.get("code") == "provider_rate_limited"
+        }
+        circuit_info = providers.rate_limit_info
+        circuit_error = ProviderRateLimitCircuitOpen(circuit_info or RateLimitInfo())
+        for claim_index in range(len(claims)):
+            if (
+                claim_index in completed_indices
+                or claim_index in existing_rate_limit_indices
+            ):
+                continue
+            errors.append(_public_provider_error(
+                retry_stage_by_index.get(claim_index, "search"),
+                circuit_error,
+                claim_index,
+            ))
+        return finish(
+            "partial" if results else "rate_limited",
+            results,
+            len(claims),
+        )
 
     if deadline_reached:
         return finish("partial" if results else "timeout", results, len(claims))
@@ -1468,8 +1684,14 @@ def retry_claim(claim: dict, claim_index: int, *, evidence: dict | None = None,
                 deadline=deadline,
                 provider_context=providers,
                 claim_index=claim_index,
+                cancel_event=cancel_event,
             )
         except Exception as exc:
+            if (
+                isinstance(exc, ProviderBackoffCancelled)
+                or (cancel_event is not None and cancel_event.is_set())
+            ):
+                return finish("cancelled")
             return failed("search", exc)
         _safe_callback(on_progress, {
             "stage": "searching", "state": "completed", "claim_index": claim_index,
@@ -1501,6 +1723,7 @@ def retry_claim(claim: dict, claim_index: int, *, evidence: dict | None = None,
             deadline=deadline,
             provider_context=providers,
             claim_index=claim_index,
+            cancel_event=cancel_event,
         )
     except NoEvidenceError:
         return finish("no_evidence", errors=[{
@@ -1510,6 +1733,11 @@ def retry_claim(claim: dict, claim_index: int, *, evidence: dict | None = None,
             "claim_index": claim_index,
         }])
     except Exception as exc:
+        if (
+            isinstance(exc, ProviderBackoffCancelled)
+            or (cancel_event is not None and cancel_event.is_set())
+        ):
+            return finish("cancelled")
         return failed("verification", exc)
     if cancel_event is not None and cancel_event.is_set():
         return finish("cancelled")

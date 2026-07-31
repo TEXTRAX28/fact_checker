@@ -161,11 +161,35 @@ function normalizeClaimError(error) {
   if (!error || typeof error !== "object") return null;
   const claimIndex = Number(error.claim_index);
   if (!Number.isInteger(claimIndex) || claimIndex < 0) return null;
+  const quotaCategory = ["RPM", "TPM", "daily", "spend", "unknown"].includes(
+    error.quota_category,
+  ) ? error.quota_category : "unknown";
+  const retryAfterSeconds = Math.max(0, Math.min(
+    300, asNumber(error.retry_after_seconds, 0),
+  ));
   return {
     claimIndex,
     stage: String(error.stage || "pipeline"),
     code: String(error.code || "provider_error"),
     message: String(error.message || error.detail || "A provider request failed."),
+    quotaCategory,
+    retryAfterSeconds,
+  };
+}
+
+function normalizeJobError(error) {
+  if (!error || typeof error !== "object") return null;
+  const quotaCategory = ["RPM", "TPM", "daily", "spend", "unknown"].includes(
+    error.quota_category,
+  ) ? error.quota_category : "unknown";
+  return {
+    stage: String(error.stage || "pipeline"),
+    code: String(error.code || "provider_error"),
+    message: String(error.message || error.detail || "A provider request failed."),
+    quotaCategory,
+    retryAfterSeconds: Math.max(0, Math.min(
+      300, asNumber(error.retry_after_seconds, 0),
+    )),
   };
 }
 
@@ -247,7 +271,14 @@ export function normalizeSnapshot(raw = {}, previous = {}) {
   }
 
   const fallbackErrors = [
-    ...(previous.errors || []),
+    ...((previous.jobErrors || []).length ? [] : (previous.errors || [])),
+    ...(previous.jobErrors || []).map((error) => ({
+      stage: error.stage,
+      code: error.code,
+      message: error.message,
+      quota_category: error.quotaCategory,
+      retry_after_seconds: error.retryAfterSeconds,
+    })),
     ...(previous.claimErrors || []).map((error) => ({
       claim_index: error.claimIndex,
       stage: error.stage,
@@ -269,11 +300,13 @@ export function normalizeSnapshot(raw = {}, previous = {}) {
       ];
   const errorValues = (Array.isArray(rawErrors) ? rawErrors : [rawErrors]).filter(Boolean);
   const claimErrors = errorValues.map(normalizeClaimError).filter(Boolean);
-  const errors = errorValues
+  const jobErrors = errorValues
     .filter((error) => normalizeClaimError(error) === null)
     .map((error) => typeof error === "string"
-      ? error
-      : String(error.message || error.detail || error.code || "Unknown error"));
+      ? normalizeJobError({ message: error })
+      : normalizeJobError(error))
+    .filter(Boolean);
+  const errors = jobErrors.map((error) => error.message);
   const claimManifest = normalizeClaimManifest(firstDefined(
     raw.claim_manifest,
     raw.claimManifest,
@@ -310,6 +343,7 @@ export function normalizeSnapshot(raw = {}, previous = {}) {
     ))),
     results,
     errors,
+    jobErrors,
     claimErrors,
     claimManifest,
     claimProgress,
@@ -435,6 +469,22 @@ export function statusCopy(snapshot) {
   const state = normalizeState(snapshot?.state);
   const count = snapshot?.claimCount || 0;
   const complete = snapshot?.completedCount || snapshot?.results?.length || 0;
+  const rateLimitError = [
+    ...(snapshot?.claimErrors || []),
+    ...(snapshot?.jobErrors || []),
+  ].find(
+    (error) => error.code === "provider_rate_limited",
+  );
+  let rateLimitDetail = "Gemini's quota was reached. Retry the unfinished claims shortly.";
+  if (rateLimitError) {
+    const category = rateLimitError.quotaCategory === "unknown"
+      ? "quota"
+      : `${rateLimitError.quotaCategory} quota`;
+    const retry = rateLimitError.retryAfterSeconds > 0
+      ? ` Retry after about ${rateLimitError.retryAfterSeconds} seconds.`
+      : " Retry shortly.";
+    rateLimitDetail = `Gemini's ${category} was reached.${retry}`;
+  }
   const copy = {
     idle: ["Ready to check", "Choose a source and start a check."],
     collecting_page: ["Reading current page", "Extracting the article text from this tab."],
@@ -450,7 +500,7 @@ export function statusCopy(snapshot) {
     cancelling: ["Cancelling…", "Waiting for the current step to stop before finishing."],
     cancelled: ["Check cancelled", "No additional claims will be processed."],
     no_evidence: ["No evidence found", "Claims were found, but no sufficiently reliable evidence was available."],
-    rate_limited: ["Rate limited", "A provider's rate limit was reached. Try again shortly."],
+    rate_limited: ["Rate limited", rateLimitDetail],
     timeout: ["Check timed out", "A provider took too long to respond."],
     unreadable: ["Page unreadable", "The page could not be read. Try pasting the article text instead."],
     invalid_input: ["Invalid input", "That input could not be checked."],
@@ -474,6 +524,7 @@ export function compactSession(snapshot, job) {
     completedCount: snapshot?.completedCount || 0,
     results: snapshot?.results || [],
     errors: snapshot?.errors || [],
+    jobErrors: snapshot?.jobErrors || [],
     claimErrors: snapshot?.claimErrors || [],
     claimManifest: snapshot?.claimManifest || [],
     claimProgress: snapshot?.claimProgress || {},
@@ -492,6 +543,36 @@ export function claimProgressCopy(stage) {
     verifying: ["CHECKING EVIDENCE", "Comparing this claim against accepted evidence."],
   };
   return copy[normalizeState(stage)] || copy.waiting;
+}
+
+export function retryActionCopy(remainingSeconds, retrying = false) {
+  const remaining = Math.max(0, Math.ceil(asNumber(remainingSeconds, 0)));
+  if (retrying) {
+    return { label: "Retrying", disabled: true, status: "" };
+  }
+  if (remaining > 0) {
+    return {
+      label: `Retry in ${remaining}s`,
+      disabled: true,
+      status: "Waiting for Gemini's retry window.",
+    };
+  }
+  return { label: "Retry claim", disabled: false, status: "" };
+}
+
+export function updateRetryCooldown(previous, occurrence, nowMs = Date.now()) {
+  const occurrenceId = [
+    String(occurrence?.jobId || ""),
+    Math.max(0, asNumber(occurrence?.claimIndex, 0)),
+    Math.max(0, asNumber(occurrence?.sequence, 0)),
+  ].join(":");
+  if (previous?.occurrenceId === occurrenceId) return previous;
+  return {
+    occurrenceId,
+    eligibleAtMs: nowMs + Math.max(
+      0, asNumber(occurrence?.retryAfterSeconds, 0),
+    ) * 1000,
+  };
 }
 
 // Pure data-shaping for the Export buttons, kept here (not in sidepanel.js) so it's

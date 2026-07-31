@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import copy
+import math
 import os
+import re
 import threading
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -21,10 +25,164 @@ PRICING_MODEL = "gemini-3.5-flash-lite"
 PRICING_DATE = "2026-07"
 PRICING_URL = "https://ai.google.dev/gemini-api/docs/pricing"
 ESTIMATE_LABEL = "Estimated list-price equivalent (before free quota)"
+MAX_PUBLIC_RETRY_AFTER_SECONDS = 300
+QUOTA_CATEGORIES = frozenset({"RPM", "TPM", "daily", "spend", "unknown"})
+DEFAULT_RETRY_AFTER_SECONDS = {
+    "RPM": 60,
+    "TPM": 60,
+    "unknown": 60,
+    "daily": 300,
+    "spend": 300,
+}
 
 
 class InvalidProviderCredentials(ValueError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class RateLimitInfo:
+    category: str = "unknown"
+    retry_after_seconds: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        value: dict[str, Any] = {"category": self.category}
+        if self.retry_after_seconds is not None:
+            value["retry_after_seconds"] = self.retry_after_seconds
+        return value
+
+
+class ProviderRateLimitCircuitOpen(RuntimeError):
+    """Safe internal signal that this job must not make another provider call."""
+
+    status_code = 429
+
+    def __init__(self, info: RateLimitInfo):
+        self.quota_category = info.category
+        self.retry_after_seconds = info.retry_after_seconds
+        super().__init__("Provider rate-limit circuit is open.")
+
+
+def _detail_nodes(value: Any, *, depth: int = 0):
+    if depth > 8:
+        return
+    if isinstance(value, dict):
+        yield value
+        for nested in value.values():
+            yield from _detail_nodes(nested, depth=depth + 1)
+    elif isinstance(value, (list, tuple)):
+        for nested in value[:100]:
+            yield from _detail_nodes(nested, depth=depth + 1)
+
+
+def _bounded_retry_seconds(value: Any) -> int | None:
+    seconds: float | None = None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        seconds = float(value)
+    elif isinstance(value, str):
+        match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)s?\s*", value)
+        if match:
+            seconds = float(match.group(1))
+    elif isinstance(value, dict):
+        raw_seconds = value.get("seconds", 0)
+        raw_nanos = value.get("nanos", 0)
+        try:
+            seconds = float(raw_seconds) + float(raw_nanos) / 1_000_000_000
+        except (TypeError, ValueError):
+            return None
+    if seconds is None or not math.isfinite(seconds) or seconds < 0:
+        return None
+    return min(MAX_PUBLIC_RETRY_AFTER_SECONDS, max(1, math.ceil(seconds)))
+
+
+def _retry_after_header(exc: Exception) -> int | None:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+    value = headers.get("retry-after") or headers.get("Retry-After")
+    seconds = _bounded_retry_seconds(value)
+    if seconds is not None:
+        return seconds
+    if not isinstance(value, str):
+        return None
+    try:
+        retry_at = parsedate_to_datetime(value)
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return _bounded_retry_seconds(delay)
+
+
+def _retry_after_details(exc: Exception) -> int | None:
+    for node in _detail_nodes(getattr(exc, "details", None)):
+        type_name = str(node.get("@type", node.get("type", "")))
+        if not type_name.endswith("google.rpc.RetryInfo"):
+            continue
+        delay = _bounded_retry_seconds(
+            node.get("retryDelay", node.get("retry_delay"))
+        )
+        if delay is not None:
+            return delay
+    return None
+
+
+def _structured_quota_category(exc: Exception) -> str:
+    """Classify only explicit google.rpc.QuotaFailure metadata."""
+    candidates: list[str] = []
+    for node in _detail_nodes(getattr(exc, "details", None)):
+        type_name = str(node.get("@type", node.get("type", "")))
+        if not type_name.endswith("google.rpc.QuotaFailure"):
+            continue
+        for violation in node.get("violations", []) or []:
+            if not isinstance(violation, dict):
+                continue
+            candidates.extend(
+                str(violation.get(field, "")).lower()
+                for field in ("quotaMetric", "quota_metric", "quotaId", "quota_id")
+            )
+    joined = " ".join(candidates)
+    if not joined.strip():
+        return "unknown"
+    if "spend" in joined or "cost" in joined:
+        return "spend"
+    if (
+        "per_day" in joined
+        or "perday" in joined
+        or "daily" in joined
+        or "requests_per_day" in joined
+    ):
+        return "daily"
+    if (
+        "token" in joined
+        and ("per_minute" in joined or "perminute" in joined or "tpm" in joined)
+    ):
+        return "TPM"
+    if (
+        "request" in joined
+        and ("per_minute" in joined or "perminute" in joined or "rpm" in joined)
+    ):
+        return "RPM"
+    return "unknown"
+
+
+def public_rate_limit_info(exc: Exception) -> RateLimitInfo:
+    category = getattr(exc, "quota_category", None)
+    if category not in QUOTA_CATEGORIES:
+        category = _structured_quota_category(exc)
+    retry_after = getattr(exc, "retry_after_seconds", None)
+    retry_after = (
+        _bounded_retry_seconds(retry_after)
+        or _retry_after_header(exc)
+        or _retry_after_details(exc)
+    )
+    if retry_after is None:
+        retry_after = DEFAULT_RETRY_AFTER_SECONDS[category]
+    return RateLimitInfo(category=category, retry_after_seconds=retry_after)
 
 
 class ProviderConcurrencyGate:
@@ -44,6 +202,9 @@ class ProviderConcurrencyGate:
             yield
         finally:
             self._gemini.release()
+
+
+_DEFAULT_PROVIDER_GATE = ProviderConcurrencyGate(gemini_limit=1)
 
 
 def _validate_key(value: str | None, provider: str) -> str:
@@ -222,10 +383,11 @@ class ProviderContext:
         self._concurrency_gate = concurrency_gate
         self._lock = threading.RLock()
         self._gemini_client = None
+        self._rate_limit_info: RateLimitInfo | None = None
 
     @classmethod
     def from_environment(cls) -> "ProviderContext":
-        return cls(None)
+        return cls(None, concurrency_gate=_DEFAULT_PROVIDER_GATE)
 
     def _resolved_credentials(self) -> ProviderCredentials:
         with self._lock:
@@ -253,6 +415,24 @@ class ProviderContext:
         if self._concurrency_gate is None:
             return nullcontext()
         return self._concurrency_gate.gemini_slot(timeout)
+
+    def trip_rate_limit(self, exc: Exception) -> RateLimitInfo:
+        info = public_rate_limit_info(exc)
+        with self._lock:
+            if self._rate_limit_info is None:
+                self._rate_limit_info = info
+            return self._rate_limit_info
+
+    def raise_if_rate_limited(self) -> None:
+        with self._lock:
+            info = self._rate_limit_info
+        if info is not None:
+            raise ProviderRateLimitCircuitOpen(info)
+
+    @property
+    def rate_limit_info(self) -> RateLimitInfo | None:
+        with self._lock:
+            return self._rate_limit_info
 
     @property
     def concurrency_limited(self) -> bool:

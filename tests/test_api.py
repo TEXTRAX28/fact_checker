@@ -361,6 +361,90 @@ def test_usage_is_exposed_as_cumulative_public_totals(client, monkeypatch):
     assert "gemini-test-key" not in str(snapshot)
 
 
+def test_manager_environment_defaults_to_one_process_wide_gemini_request(
+    monkeypatch,
+):
+    observed = []
+    real_gate = jobs.ProviderConcurrencyGate
+
+    class RecordingGate(real_gate):
+        def __init__(self, *, gemini_limit):
+            observed.append(gemini_limit)
+            super().__init__(gemini_limit=gemini_limit)
+
+    monkeypatch.delenv("GEMINI_CONCURRENCY", raising=False)
+    monkeypatch.setattr(jobs, "ProviderConcurrencyGate", RecordingGate)
+    manager = api._manager_from_env()
+    try:
+        assert observed == [1]
+    finally:
+        manager.shutdown()
+
+    configured_high = jobs.JobManager(gemini_concurrency=9)
+    try:
+        assert observed == [1, 1]
+    finally:
+        configured_high.shutdown()
+
+
+def test_rate_limited_snapshot_marks_every_unfinished_claim_retryable(
+    client, monkeypatch,
+):
+    class RateLimitedOutcome:
+        def to_dict(self):
+            return {
+                "status": "rate_limited",
+                "results": [],
+                "claim_count": 2,
+                "completed_count": 0,
+                "errors": [
+                    {
+                        "stage": "search",
+                        "code": "provider_rate_limited",
+                        "message": "A provider rate limit was reached.",
+                        "claim_index": index,
+                        "quota_category": "RPM",
+                        "retry_after_seconds": 17,
+                    }
+                    for index in range(2)
+                ],
+                "message": "A provider rate limit was reached.",
+                "normalized_url": None,
+                "metadata": None,
+                "usage": {},
+            }
+
+    def checking(*_args, **kwargs):
+        kwargs["on_claims"]([
+            {"claim": "first", "query": "private first query", "speaker": "A"},
+            {"claim": "second", "query": "private second query", "speaker": "B"},
+        ])
+        return RateLimitedOutcome()
+
+    monkeypatch.setattr(jobs.service, "check_text", checking)
+    created = create_check(client, {"type": "text", "text": "factual body"}).json()
+    snapshot = wait_for_status(client, created, "rate_limited")
+
+    assert snapshot["claim_progress"] == {"0": "failed", "1": "failed"}
+    assert [error["claim_index"] for error in snapshot["errors"]] == [0, 1]
+    assert all(error["quota_category"] == "RPM" for error in snapshot["errors"])
+    assert all(
+        1 <= error["retry_after_seconds"] <= 17 for error in snapshot["errors"]
+    )
+    assert "private" not in str(snapshot)
+
+    too_early = client.post(
+        f"/v1/checks/{created['id']}/claims/0/retry",
+        headers=access_headers(created, include_provider=True),
+    )
+    assert too_early.status_code == 429
+    assert 1 <= int(too_early.headers["Retry-After"]) <= 17
+    unchanged = client.get(
+        f"/v1/checks/{created['id']}", headers=access_headers(created)
+    ).json()
+    assert unchanged["retry_attempts"] == {}
+
+
 def test_concurrent_clients_keep_provider_credentials_isolated(monkeypatch):
     observed = {}
     lock = threading.Lock()
