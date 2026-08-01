@@ -56,6 +56,15 @@ docs/archive/
 HANDLING.md
 PUBLICATION_BYOK_PLAN.md
 *.pptx
+!Presentation-finished.pptx
+
+# Presentation build and inspection artifacts
+.codex-presentation-work/
+Presentation/
+Presentation-finished/
+Presentation-technical/
+Presentation-*.pptx.inspect.ndjson
+Presentation-script.txt
 
 # graphify 
 graphify-out/

@@ -1,9 +1,0 @@
-Slide 1: Rewrites the source tagline to establish the Gemini-only migration.
-Slide 2: Reuses the source evidence statement layout for the architectural thesis.
-Slides 3, 5, 7, and 9: Reuse the source three-column input layout for compact technical concepts; inherited positions and typography are unchanged.
-Slide 4: Reuses the source horizontal pipeline layout for the process story.
-Slide 8: Reuses the source three-column layout to show the three current list-price rates.
-Slide 6: Preserves the source TRUE / FALSE / UNVERIFIABLE outcome labels and rewrites only the title.
-Slide 10: Rewrites the closing line.
-Source slides 2, 4, 8, and 9 are omitted because their question/screenshot patterns are not needed and the screenshots contain legacy two-provider information.
-No new primitives, overlays, images, charts, or layout changes are introduced.
