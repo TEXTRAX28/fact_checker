@@ -81,6 +81,19 @@ function normalizeUsage(value = {}, previous = {}) {
         gemini.total_tokens, gemini.totalTokens, previousGemini.totalTokens, 0,
       ))),
       complete: Boolean(firstDefined(gemini.complete, previousGemini.complete, true)),
+      requestAccountingComplete: Boolean(firstDefined(
+        gemini.request_accounting_complete,
+        gemini.requestAccountingComplete,
+        previousGemini.requestAccountingComplete,
+        true,
+      )),
+      tokenAccountingComplete: Boolean(firstDefined(
+        gemini.token_accounting_complete,
+        gemini.tokenAccountingComplete,
+        previousGemini.tokenAccountingComplete,
+        gemini.complete,
+        true,
+      )),
     },
     googleSearch: {
       queryCount: Math.max(0, asNumber(firstDefined(
@@ -89,6 +102,13 @@ function normalizeUsage(value = {}, previous = {}) {
         previousSearch.queryCount,
         0,
       ))),
+      queryAccountingComplete: Boolean(firstDefined(
+        googleSearch.query_accounting_complete,
+        googleSearch.queryAccountingComplete,
+        previousSearch.queryAccountingComplete,
+        value?.complete,
+        true,
+      )),
     },
     estimatedCostUsd: Math.max(0, asNumber(firstDefined(
       value?.estimated_cost_usd,
@@ -135,6 +155,54 @@ function normalizeUsage(value = {}, previous = {}) {
         0.014,
       ))),
     },
+    cost: {
+      amountUsd: Math.max(0, asNumber(firstDefined(
+        value?.cost?.amount_usd,
+        value?.cost?.amountUsd,
+        value?.estimated_cost_usd,
+        value?.estimatedCostUsd,
+        previous?.cost?.amountUsd,
+        0,
+      ))),
+      type: String(firstDefined(
+        value?.cost?.type,
+        previous?.cost?.type,
+        "calculated_list_price_equivalent",
+      )),
+      usageComplete: Boolean(firstDefined(
+        value?.cost?.usage_complete,
+        value?.cost?.usageComplete,
+        previous?.cost?.usageComplete,
+        value?.complete,
+        true,
+      )),
+      includesFreeQuota: Boolean(firstDefined(
+        value?.cost?.includes_free_quota,
+        value?.cost?.includesFreeQuota,
+        previous?.cost?.includesFreeQuota,
+        false,
+      )),
+      isActualBill: Boolean(firstDefined(
+        value?.cost?.is_actual_bill,
+        value?.cost?.isActualBill,
+        previous?.cost?.isActualBill,
+        false,
+      )),
+    },
+    usageAccountingComplete: Boolean(firstDefined(
+      value?.usage_accounting_complete,
+      value?.usageAccountingComplete,
+      previous?.usageAccountingComplete,
+      value?.complete,
+      true,
+    )),
+    costEstimateComplete: Boolean(firstDefined(
+      value?.cost_estimate_complete,
+      value?.costEstimateComplete,
+      previous?.costEstimateComplete,
+      value?.complete,
+      true,
+    )),
     complete: Boolean(firstDefined(value?.complete, previous?.complete, true)),
   };
 }
@@ -154,6 +222,16 @@ function normalizeSource(source, index) {
   return {
     url: String(url),
     title: String(firstDefined(source.title, source.name, source.domain, `Source ${index + 1}`)),
+    domain: firstDefined(source.domain, null),
+    canonicalUrl: firstDefined(source.canonical_url, source.canonicalUrl, null),
+    providerUrl: firstDefined(source.provider_url, source.providerUrl, null),
+    sourceType: firstDefined(source.source_type, source.sourceType, null),
+    qualityTier: firstDefined(source.quality_tier, source.qualityTier, null),
+    canonicalResolution: firstDefined(
+      source.canonical_resolution, source.canonicalResolution, null,
+    ),
+    searchQuery: firstDefined(source.search_query, source.searchQuery, null),
+    searchAttempt: firstDefined(source.search_attempt, source.searchAttempt, null),
   };
 }
 
@@ -234,6 +312,12 @@ export function normalizeResult(result, fallbackIndex = 0) {
     confidence: Math.min(100, Math.max(0, asNumber(result?.confidence, 0))),
     explanation: String(firstDefined(result?.explanation, result?.reasoning, "No explanation was provided.")),
     sources,
+    evidenceStatus: firstDefined(result?.evidence_status, result?.evidenceStatus, null),
+    confidenceFactors: firstDefined(
+      result?.confidence_factors, result?.confidenceFactors, null,
+    ),
+    mergedFrom: firstDefined(result?.merged_from, result?.mergedFrom, null),
+    originalClaims: firstDefined(result?.original_claims, result?.originalClaims, null),
   };
 }
 
@@ -602,6 +686,10 @@ export function buildExportData(snapshot, source = {}) {
         claim: result.claim,
         explanation: result.explanation,
         sources: result.sources || [],
+        evidenceStatus: result.evidenceStatus || null,
+        confidenceFactors: result.confidenceFactors || null,
+        mergedFrom: result.mergedFrom || null,
+        originalClaims: result.originalClaims || null,
       };
     }
 
@@ -620,6 +708,11 @@ export function buildExportData(snapshot, source = {}) {
       sources: [],
     };
   });
+  const usage = normalizeUsage(snapshot?.usage);
+  const verificationStatus = snapshot?.state || "idle";
+  const verificationComplete = ["complete", "complete_no_claims"].includes(
+    verificationStatus,
+  ) && claims.every((claim) => claim.status === "completed");
   return {
     exportedAt: new Date().toISOString(),
     source: {
@@ -628,12 +721,16 @@ export function buildExportData(snapshot, source = {}) {
       url: source.url || null,
     },
     summary: {
-      status: snapshot?.state || "idle",
+      status: verificationStatus,
+      verificationStatus,
+      verificationComplete,
       claimCount,
       completedCount: results.length,
       failedCount: claims.filter((claim) => claim.status === "failed").length,
       incompleteCount: claims.filter((claim) => claim.status === "incomplete").length,
-      usage: normalizeUsage(snapshot?.usage),
+      usageAccountingComplete: usage.usageAccountingComplete,
+      costEstimateComplete: usage.costEstimateComplete,
+      usage,
     },
     errors: [
       ...(snapshot?.errors || []).map((message) => ({ message })),
@@ -656,7 +753,10 @@ export function toMarkdownReport(data) {
   lines.push(`**Claims checked:** ${data.summary.completedCount} of ${data.summary.claimCount}`);
   lines.push(`**Gemini tokens:** ${data.summary.usage.gemini.totalTokens}`);
   lines.push(`**Google Search queries:** ${data.summary.usage.googleSearch.queryCount}`);
-  lines.push(`**Estimated list-price equivalent (before free quota):** $${data.summary.usage.estimatedCostUsd.toFixed(4)}`);
+  const costLabel = data.summary.usage.costEstimateComplete
+    ? "Calculated list-price equivalent (before free quota)"
+    : "Partial list-price estimate (before free quota)";
+  lines.push(`**${costLabel}:** $${data.summary.usage.estimatedCostUsd.toFixed(4)}`);
   lines.push(`**Pricing basis:** ${data.summary.usage.pricing.model}, ${data.summary.usage.pricing.pricingDate}; $${data.summary.usage.pricing.inputUsdPerMillionTokens}/1M input tokens, $${data.summary.usage.pricing.outputUsdPerMillionTokens}/1M output tokens including thinking, $${data.summary.usage.pricing.googleSearchUsdPerQuery}/Google Search query`);
   lines.push(`**Pricing source:** ${data.summary.usage.pricing.pricingUrl}`);
   lines.push("**Billing note:** Estimate only; the actual bill may differ and free quota may make it $0.");

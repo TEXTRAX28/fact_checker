@@ -318,7 +318,7 @@ def test_one_evidence_miss_does_not_leave_a_partial_blank_claim(monkeypatch):
     monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: extraction_payload(2))
 
     def search(query, *_args, **_kwargs):
-        if query == "query-0":
+        if query in {"query-0", "claim-0"}:
             return "", []
         return "evidence", [one_source()]
 
@@ -670,6 +670,100 @@ def test_source_title_cannot_spoof_high_quality_ranking():
     assert ranked[0]["url"].startswith("https://en.wikipedia.org/")
 
 
+def test_trusted_grounding_redirect_uses_publisher_title_for_ranking():
+    response = SimpleNamespace(candidates=[SimpleNamespace(
+        grounding_metadata=SimpleNamespace(
+            grounding_chunks=[SimpleNamespace(web=SimpleNamespace(
+                uri="https://vertexaisearch.cloud.google.com/grounding-api-redirect/token",
+                title="whitehouse.gov",
+            ))],
+            grounding_supports=[SimpleNamespace(
+                segment=SimpleNamespace(text="Official announcement."),
+                grounding_chunk_indices=[0],
+            )],
+        ),
+    )])
+
+    sources = fact_checker._grounded_sources(response)
+
+    assert sources[0]["domain"] == "whitehouse.gov"
+    assert sources[0]["provider_domain"] == "vertexaisearch.cloud.google.com"
+    assert fact_checker._source_quality(fact_checker._source_domain(sources[0]))[0] == 1
+
+
+def test_prepare_source_replaces_provider_redirect_with_canonical_url(monkeypatch):
+    monkeypatch.setattr(
+        fact_checker,
+        "resolve_public_redirect",
+        lambda _url, **_kwargs: "https://www.whitehouse.gov/briefing-room/statement/",
+    )
+
+    prepared = fact_checker._prepare_source({
+        "url": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/token",
+        "provider_url": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/token",
+        "publisher_domain": "whitehouse.gov",
+        "title": "whitehouse.gov",
+    })
+
+    assert prepared["url"] == "https://www.whitehouse.gov/briefing-room/statement/"
+    assert prepared["canonical_url"] == prepared["url"]
+    assert prepared["provider_url"].startswith("https://vertexaisearch.cloud.google.com/")
+    assert prepared["source_type"] == "official_or_primary"
+    assert prepared["quality_tier"] == 1
+
+
+def test_search_claim_uses_one_fallback_only_after_empty_evidence(monkeypatch):
+    searched = []
+
+    def search(query, *_args):
+        searched.append(query)
+        if len(searched) == 1:
+            return "", []
+        return "evidence", [one_source()]
+
+    monkeypatch.setattr(fact_checker, "_search", search)
+    text, sources, attempted = fact_checker._search_claim({
+        "claim": "The policy took effect in May.",
+        "query": "official policy effective date May",
+    })
+
+    assert text == "evidence"
+    assert attempted == searched == [
+        "official policy effective date May", "The policy took effect in May.",
+    ]
+    assert sources[0]["search_attempt"] == 2
+
+
+def test_search_claim_does_not_retry_provider_failure(monkeypatch):
+    searched = []
+
+    def search(query, *_args):
+        searched.append(query)
+        raise TimeoutError("provider failed")
+
+    monkeypatch.setattr(fact_checker, "_search", search)
+    with __import__("pytest").raises(TimeoutError):
+        fact_checker._search_claim({"claim": "claim text", "query": "first query"})
+    assert searched == ["first query"]
+
+
+def test_claim_deduplication_is_conservative_and_keeps_provenance():
+    claims = [
+        {"claim": "The rate increased to 12 percent in May.", "query": "q1"},
+        {"claim": "The rate increased to 12 percent in May", "query": "q2"},
+        {"claim": "The rate increased to 13 percent in May.", "query": "q3"},
+    ]
+
+    deduplicated = fact_checker._deduplicate_claims(claims)
+
+    assert len(deduplicated) == 2
+    assert deduplicated[0]["merged_from"] == [0, 1]
+    assert deduplicated[0]["original_claims"] == [
+        claims[0]["claim"], claims[1]["claim"],
+    ]
+    assert deduplicated[1]["claim"] == claims[2]["claim"]
+
+
 def test_grounded_search_timeout_is_bounded_by_remaining_deadline():
     captured = {}
     client = SimpleNamespace(models=SimpleNamespace(
@@ -904,6 +998,31 @@ def test_verify_one_caps_confidence_without_direct_evidence(monkeypatch):
     assert "warning" not in verdict
 
 
+def test_verify_one_recalculates_confidence_from_auditable_evidence(monkeypatch):
+    monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: json.dumps([{
+        "claim": "x", "supported": True, "contradicted": False, "verdict": "TRUE",
+        "confidence": 99, "explanation": "supported",
+        "source_analysis": [
+            {"source_index": 0, "stance": "SUPPORTS", "directness": "DIRECT"},
+        ],
+    }]))
+    official = fact_checker._verify_one(
+        {"claim": "The event happened.", "speaker": "X"}, "evidence",
+        [one_source(url="https://agency.gov/report", quality_tier=1)],
+    )
+    weak = fact_checker._verify_one(
+        {"claim": "The event happened.", "speaker": "X"}, "evidence",
+        [one_source(url="https://unknown.example/post", quality_tier=4)],
+    )
+
+    assert official["confidence"] > weak["confidence"]
+    assert official["confidence"] != 99
+    assert official["confidence_factors"]["model_score_used"] is False
+    assert official["confidence_factors"]["meaning"] == (
+        "evidence_strength_not_truth_probability"
+    )
+
+
 def test_verify_one_attaches_source_titles_not_bare_urls(monkeypatch):
     monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: json.dumps([{
         "claim": "x", "supported": True, "contradicted": False, "verdict": "TRUE",
@@ -1021,7 +1140,8 @@ def test_fact_check_exposes_private_claims_and_evidence_to_job_storage(monkeypat
     assert evidence_seen == [{
         "claim_index": 0,
         "search_text": "Saved evidence.",
-        "sources": [source],
+        "sources": [{**source, "search_query": "query-0", "search_attempt": 1}],
+        "search_queries": ["query-0"],
     }]
 
 
@@ -1334,7 +1454,8 @@ def test_circuit_preserves_late_grounded_evidence_for_verification_only_retry(
     assert evidence_seen == [{
         "claim_index": 1,
         "search_text": "Already-paid grounded evidence.",
-        "sources": [one_source()],
+        "sources": [{**one_source(), "search_query": "query-1", "search_attempt": 1}],
+        "search_queries": ["query-1"],
     }]
     error_by_claim = {error["claim_index"]: error for error in result.errors}
     assert error_by_claim[0]["stage"] == "search"

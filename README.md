@@ -63,7 +63,8 @@ logic are not duplicated in frontend code.
 3. Ask Gemini 3.5 Flash-Lite through Google AI Studio to extract up to 15 factual claims and a
    targeted search query for each claim.
 4. Ask Gemini to retrieve current evidence with built-in Google Search
-   grounding and return structured citation metadata.
+   grounding and return structured citation metadata. If no usable evidence
+   survives, make one bounded fallback search using the literal claim text.
 5. Rank accepted sources and retain up to three evidence sources per claim.
 6. Verify each claim against its own evidence.
 7. Derive `supported` and `contradicted` from per-source analysis, then derive
@@ -76,6 +77,8 @@ results retain their original claim indexes even when they finish out of order.
 ## Evidence Safeguards
 
 - Empty search evidence never reaches the verification model.
+- A retrieval miss gets at most one fallback search; provider failures and
+  rate limits are not retried as alternate queries.
 - The model must classify each source as supporting, contradicting, partial,
   irrelevant, or insufficient.
 - Final verdict labels are recomputed in Python instead of trusting the model's
@@ -85,6 +88,10 @@ results retain their original claim indexes even when they finish out of order.
 - Social and user-generated citations such as Facebook, X, Reddit, Medium, and
   LinkedIn are excluded before grounded evidence enters verification.
 - Gemini-synthesized grounded-summary segments that are bound to citation metadata are bounded before they enter a verification prompt.
+- Trusted Google grounding redirects are resolved through a public-URL-only
+  redirect checker, and exports retain both canonical and provider URLs.
+- Confidence is recalculated as an auditable evidence-strength score; it is
+  not presented as a probability that the claim is true.
 - Provider failures are sanitized before being returned through the API.
 - The Gemini API key is isolated per job and never enters snapshots, events, or
   exports.
@@ -204,7 +211,8 @@ Google Search query after the free allowance. This is not the user's bill;
 actual charges may differ and free quota may make them $0. See the
 [official Gemini API pricing page](https://ai.google.dev/gemini-api/docs/pricing).
 A partial-estimate marker is shown when Gemini omits token or search-query
-usage metadata. Replayed SSE events replace cumulative totals instead of adding
+usage metadata. Verification completion, usage-accounting completeness, and
+cost-estimate completeness are exported as separate fields. Replayed SSE events replace cumulative totals instead of adding
 them again.
 
 Gemini requests use a process-wide concurrency ceiling of three by default.
@@ -220,6 +228,8 @@ allowlisted quota category (`RPM`, `TPM`, `daily`, `spend`, or `unknown`) and a
 bounded retry delay—never Google's raw error, project, account, or key details.
 With fifteen extracted claims, the normal worst case is 31 Gemini calls: one
 extraction, fifteen separately grounded searches, and fifteen separate verifications.
+If all first-pass searches return no usable evidence, the bounded fallback can
+raise that ceiling to 46 calls. It never runs after a provider error or rate limit.
 Verification is deliberately not batched because each verdict must remain
 bound to that claim's own grounded sources and `source_analysis` indices.
 

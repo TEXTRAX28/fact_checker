@@ -58,6 +58,12 @@ def test_usage_ledger_prices_tool_prompt_and_thinking_tokens_thread_safely():
         + 40 * 0.014
     )
     assert snapshot["complete"] is True
+    assert snapshot["gemini"]["request_accounting_complete"] is True
+    assert snapshot["gemini"]["token_accounting_complete"] is True
+    assert snapshot["google_search"]["query_accounting_complete"] is True
+    assert snapshot["usage_accounting_complete"] is True
+    assert snapshot["cost"]["type"] == "calculated_list_price_equivalent"
+    assert snapshot["cost"]["is_actual_bill"] is False
 
     ledger.record_gemini(
         model="model",
@@ -83,6 +89,10 @@ def test_usage_estimate_is_partial_when_search_query_metadata_is_missing():
     snapshot = ledger.snapshot()
     assert snapshot["google_search"]["query_count"] == 0
     assert snapshot["complete"] is False
+    assert snapshot["gemini"]["token_accounting_complete"] is True
+    assert snapshot["google_search"]["query_accounting_complete"] is False
+    assert snapshot["cost_estimate_complete"] is False
+    assert snapshot["cost"]["type"] == "partial_list_price_estimate"
     assert snapshot["pricing"]["model"] == "gemini-3.5-flash-lite"
     assert snapshot["pricing"]["pricing_date"] == "2026-07"
     assert snapshot["pricing"]["pricing_url"].startswith("https://ai.google.dev/")

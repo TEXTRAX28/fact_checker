@@ -448,6 +448,10 @@ test("buildExportData shapes a completed snapshot for export", () => {
   assert.equal(data.source.mode, "url");
   assert.equal(data.source.url, "https://example.com/article");
   assert.equal(data.summary.completedCount, 1);
+  assert.equal(data.summary.verificationStatus, "complete");
+  assert.equal(data.summary.verificationComplete, true);
+  assert.equal(data.summary.usageAccountingComplete, true);
+  assert.equal(data.summary.costEstimateComplete, true);
   assert.equal(data.claims.length, 1);
   assert.equal(data.claims[0].verdict, "TRUE");
   assert.equal(data.claims[0].sources[0].url, "https://en.wikipedia.org/wiki/Eiffel_Tower");
@@ -480,8 +484,41 @@ test("exports include usage totals but never capabilities or provider keys", () 
   assert.match(serialized, /"totalTokens":100/);
   assert.match(serialized, /"queryCount":2/);
   assert.match(serialized, /"estimatedCostUsd":0.028074/);
+  assert.match(serialized, /"usageAccountingComplete":true/);
   assert.doesNotMatch(serialized, /private-job-token/);
   assert.doesNotMatch(serialized, /private-gemini-key/);
+});
+
+test("exports preserve canonical source and evidence audit metadata", () => {
+  const snapshot = normalizeSnapshot({
+    id: "check-audit-export",
+    status: "completed",
+    claim_count: 1,
+    results: [{
+      claim_index: 0,
+      claim: "The policy took effect in May.",
+      verdict: "TRUE",
+      confidence: 84,
+      evidence_status: "sufficient",
+      confidence_factors: { model_score_used: false },
+      sources: [{
+        url: "https://agency.gov/policy",
+        canonical_url: "https://agency.gov/policy",
+        provider_url: "https://vertexaisearch.cloud.google.com/redirect/token",
+        domain: "agency.gov",
+        source_type: "official_or_primary",
+        quality_tier: 1,
+        search_query: "official policy May",
+        search_attempt: 2,
+      }],
+    }],
+  });
+
+  const data = buildExportData(snapshot);
+  assert.equal(data.claims[0].sources[0].canonicalUrl, "https://agency.gov/policy");
+  assert.equal(data.claims[0].sources[0].providerUrl.includes("vertexaisearch"), true);
+  assert.equal(data.claims[0].sources[0].qualityTier, 1);
+  assert.equal(data.claims[0].confidenceFactors.model_score_used, false);
 });
 
 test("buildExportData includes failed and unfinished claim slots", () => {
@@ -515,6 +552,7 @@ test("buildExportData includes failed and unfinished claim slots", () => {
   assert.equal(data.claims[2].status, "incomplete");
   assert.equal(data.summary.failedCount, 1);
   assert.equal(data.summary.incompleteCount, 1);
+  assert.equal(data.summary.verificationComplete, false);
   assert.equal(data.errors[0].claimIndex, 1);
 
   const markdown = toMarkdownReport(data);

@@ -245,6 +245,68 @@ def _usage_value(usage: Any, *names: str) -> int | None:
     return None
 
 
+def _usage_snapshot(events: list[dict[str, Any]]) -> dict[str, Any]:
+    events = copy.deepcopy(events)
+    successful = [event for event in events if event.get("succeeded")]
+    token_complete = all(event.get("reported", False) for event in events)
+    query_complete = all(
+        event.get("search_query_count_reported", False) for event in events
+    )
+    usage_complete = token_complete and query_complete
+    input_tokens = sum(event.get("input_tokens") or 0 for event in events)
+    output_tokens = sum(event.get("output_tokens") or 0 for event in events)
+    total_tokens = sum(event.get("total_tokens") or 0 for event in events)
+    query_count = sum(event.get("search_query_count") or 0 for event in events)
+    token_cost = (
+        input_tokens * INPUT_USD_PER_MILLION_TOKENS
+        + output_tokens * OUTPUT_USD_PER_MILLION_TOKENS
+    ) / 1_000_000
+    estimated_cost = round(token_cost + query_count * GOOGLE_SEARCH_USD_PER_QUERY, 8)
+    cost_type = (
+        "calculated_list_price_equivalent"
+        if usage_complete else "partial_list_price_estimate"
+    )
+    return {
+        "gemini": {
+            "requests": len(events),
+            "successful_requests": len(successful),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "request_accounting_complete": True,
+            "token_accounting_complete": token_complete,
+            # Backward compatibility: this historically meant all priced usage fields.
+            "complete": usage_complete,
+            "events": events,
+        },
+        "google_search": {
+            "query_count": query_count,
+            "query_accounting_complete": query_complete,
+        },
+        "estimated_cost_usd": estimated_cost,
+        "cost": {
+            "amount_usd": estimated_cost,
+            "type": cost_type,
+            "usage_complete": usage_complete,
+            "includes_free_quota": False,
+            "is_actual_bill": False,
+            "pricing_date": PRICING_DATE,
+        },
+        "pricing": {
+            "label": ESTIMATE_LABEL,
+            "model": PRICING_MODEL,
+            "pricing_date": PRICING_DATE,
+            "pricing_url": PRICING_URL,
+            "input_usd_per_million_tokens": INPUT_USD_PER_MILLION_TOKENS,
+            "output_usd_per_million_tokens": OUTPUT_USD_PER_MILLION_TOKENS,
+            "google_search_usd_per_query": GOOGLE_SEARCH_USD_PER_QUERY,
+        },
+        "usage_accounting_complete": usage_complete,
+        "cost_estimate_complete": usage_complete,
+        "complete": usage_complete,
+    }
+
+
 class UsageLedger:
     def __init__(self, on_update: Callable[[dict[str, Any]], None] | None = None):
         self._lock = threading.RLock()
@@ -316,46 +378,7 @@ class UsageLedger:
             return self._snapshot_locked()
 
     def _snapshot_locked(self) -> dict[str, Any]:
-        events = copy.deepcopy(self._gemini_events)
-        successful = [event for event in events if event["succeeded"]]
-        complete = all(
-            event["reported"] and event["search_query_count_reported"]
-            for event in events
-        )
-        input_tokens = sum(event["input_tokens"] or 0 for event in events)
-        output_tokens = sum(event["output_tokens"] or 0 for event in events)
-        total_tokens = sum(event["total_tokens"] or 0 for event in events)
-        query_count = sum(event["search_query_count"] or 0 for event in events)
-        token_cost = (
-            input_tokens * INPUT_USD_PER_MILLION_TOKENS
-            + output_tokens * OUTPUT_USD_PER_MILLION_TOKENS
-        ) / 1_000_000
-        search_cost = query_count * GOOGLE_SEARCH_USD_PER_QUERY
-        return {
-            "gemini": {
-                "requests": len(events),
-                "successful_requests": len(successful),
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "total_tokens": total_tokens,
-                "complete": complete,
-                "events": events,
-            },
-            "google_search": {
-                "query_count": query_count,
-            },
-            "estimated_cost_usd": round(token_cost + search_cost, 8),
-            "pricing": {
-                "label": ESTIMATE_LABEL,
-                "model": PRICING_MODEL,
-                "pricing_date": PRICING_DATE,
-                "pricing_url": PRICING_URL,
-                "input_usd_per_million_tokens": INPUT_USD_PER_MILLION_TOKENS,
-                "output_usd_per_million_tokens": OUTPUT_USD_PER_MILLION_TOKENS,
-                "google_search_usd_per_query": GOOGLE_SEARCH_USD_PER_QUERY,
-            },
-            "complete": complete,
-        }
+        return _usage_snapshot(self._gemini_events)
 
     def _notify(self, snapshot: dict[str, Any]) -> None:
         if self._on_update is None:
@@ -461,42 +484,4 @@ def merge_usage(
         *copy.deepcopy(first.get("gemini", {}).get("events", [])),
         *copy.deepcopy(second.get("gemini", {}).get("events", [])),
     ]
-    complete = bool(first.get("gemini", {}).get("complete", True)) and bool(
-        second.get("gemini", {}).get("complete", True)
-    )
-    input_tokens = sum(event.get("input_tokens") or 0 for event in events)
-    output_tokens = sum(event.get("output_tokens") or 0 for event in events)
-    total_tokens = sum(event.get("total_tokens") or 0 for event in events)
-    query_count = sum(event.get("search_query_count") or 0 for event in events)
-    complete = complete and all(
-        event.get("search_query_count_reported", True) for event in events
-    )
-    token_cost = (
-        input_tokens * INPUT_USD_PER_MILLION_TOKENS
-        + output_tokens * OUTPUT_USD_PER_MILLION_TOKENS
-    ) / 1_000_000
-    return {
-        "gemini": {
-            "requests": len(events),
-            "successful_requests": sum(event.get("succeeded", False) for event in events),
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "total_tokens": total_tokens,
-            "complete": complete,
-            "events": events,
-        },
-        "google_search": {"query_count": query_count},
-        "estimated_cost_usd": round(
-            token_cost + query_count * GOOGLE_SEARCH_USD_PER_QUERY, 8
-        ),
-        "pricing": {
-            "label": ESTIMATE_LABEL,
-            "model": PRICING_MODEL,
-            "pricing_date": PRICING_DATE,
-            "pricing_url": PRICING_URL,
-            "input_usd_per_million_tokens": INPUT_USD_PER_MILLION_TOKENS,
-            "output_usd_per_million_tokens": OUTPUT_USD_PER_MILLION_TOKENS,
-            "google_search_usd_per_query": GOOGLE_SEARCH_USD_PER_QUERY,
-        },
-        "complete": complete,
-    }
+    return _usage_snapshot(events)
