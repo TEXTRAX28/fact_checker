@@ -52,7 +52,7 @@ test("buildCheckPayload constructs the exact page contract", () => {
 });
 
 test("buildCheckPayload validates URL and text modes", () => {
-  assert.deepEqual(buildCheckPayload({ mode: "url", url: "https://example.com/a", forceRefresh: true }), {
+  assert.deepEqual(buildCheckPayload({ mode: "url", url: "https://example.com/a" }), {
     type: "url",
     url: "https://example.com/a",
   });

@@ -172,7 +172,7 @@ function bindEvents() {
 
   elements.primary.addEventListener("click", () => {
     if (isRunning()) void requestCancellation();
-    else void startCheck(isTerminalState(app.snapshot.state));
+    else void startCheck();
   });
 
   elements.backend.addEventListener("click", () => void checkBackend());
@@ -775,7 +775,7 @@ function renderEmptyResult() {
   return empty;
 }
 
-async function startCheck(forceRefresh) {
+async function startCheck() {
   app.inputMessage = "";
   renderInputMessage();
 
@@ -786,7 +786,6 @@ async function startCheck(forceRefresh) {
       page: app.page,
       url: app.drafts.url,
       text: app.drafts.text,
-      forceRefresh,
     });
     const response = await createCheck(payload, credentials, app.installId);
     // The backend's job snapshot field is `id`, not `check_id` (jobs.py's

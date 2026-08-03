@@ -217,19 +217,27 @@ function normalizeSource(source, index) {
     return { url: source, title: `Source ${index + 1}` };
   }
   if (!source || typeof source !== "object") return null;
-  const url = firstDefined(source.url, source.href, source.link);
-  if (!url) return null;
+  const url = firstDefined(source.url, source.href, source.link, null);
+  const canonicalResolution = firstDefined(
+    source.canonical_resolution, source.canonicalResolution, null,
+  );
+  if (!url && canonicalResolution !== "failed") return null;
   return {
-    url: String(url),
+    url: url ? String(url) : null,
     title: String(firstDefined(source.title, source.name, source.domain, `Source ${index + 1}`)),
     domain: firstDefined(source.domain, null),
     canonicalUrl: firstDefined(source.canonical_url, source.canonicalUrl, null),
-    providerUrl: firstDefined(source.provider_url, source.providerUrl, null),
+    providerUrl: canonicalResolution === "failed"
+      ? null
+      : firstDefined(source.provider_url, source.providerUrl, null),
     sourceType: firstDefined(source.source_type, source.sourceType, null),
     qualityTier: firstDefined(source.quality_tier, source.qualityTier, null),
-    canonicalResolution: firstDefined(
-      source.canonical_resolution, source.canonicalResolution, null,
-    ),
+    canonicalResolution,
+    displayable: Boolean(firstDefined(source.displayable, url, false)),
+    evidenceKind: firstDefined(source.evidence_kind, source.evidenceKind, null),
+    isFullContent: Boolean(firstDefined(
+      source.is_full_content, source.isFullContent, false,
+    )),
     searchQuery: firstDefined(source.search_query, source.searchQuery, null),
     searchAttempt: firstDefined(source.search_attempt, source.searchAttempt, null),
   };
@@ -440,6 +448,13 @@ export function normalizeSnapshot(raw = {}, previous = {}) {
       firstDefined(raw.usage, raw.outcome?.usage, previous.usage, {}),
       previous.usage || {},
     ),
+    extractionStats: firstDefined(
+      raw.extraction_stats,
+      raw.extractionStats,
+      raw.outcome?.extraction_stats,
+      previous.extractionStats,
+      {},
+    ),
     cached: Boolean(firstDefined(raw.cached, raw.cache_hit, previous.cached, false)),
     startedAt: firstDefined(raw.started_at, raw.startedAt, previous.startedAt, null),
     completedAt: firstDefined(raw.completed_at, raw.completedAt, previous.completedAt, null),
@@ -531,6 +546,7 @@ export function mergeEvent(snapshot, data = {}, eventType = "") {
       errors: outcome.errors,
       claim_count: outcome.claim_count,
       usage: outcome.usage,
+      extraction_stats: outcome.extraction_stats,
       retrying_claim_index: null,
     }, current);
   }
@@ -616,6 +632,7 @@ export function compactSession(snapshot, job) {
     retryAttempts: snapshot?.retryAttempts || {},
     claimRetryLimit: snapshot?.claimRetryLimit || 2,
     usage: snapshot?.usage || normalizeUsage(),
+    extractionStats: snapshot?.extractionStats || {},
     cached: Boolean(snapshot?.cached),
   };
 }
@@ -731,6 +748,7 @@ export function buildExportData(snapshot, source = {}) {
       usageAccountingComplete: usage.usageAccountingComplete,
       costEstimateComplete: usage.costEstimateComplete,
       usage,
+      extractionStats: snapshot?.extractionStats || {},
     },
     errors: [
       ...(snapshot?.errors || []).map((message) => ({ message })),
@@ -776,7 +794,11 @@ export function toMarkdownReport(data) {
     if (claim.sources?.length) {
       lines.push("Sources:");
       for (const source of claim.sources) {
-        lines.push(`- [${source.title || source.url}](${source.url})`);
+        if (source.url) {
+          lines.push(`- [${source.title || source.url}](${source.url})`);
+        } else {
+          lines.push(`- ${source.title || source.domain || "Source unavailable"} (canonical URL unavailable)`);
+        }
       }
       lines.push("");
     }

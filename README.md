@@ -36,16 +36,21 @@ Chrome extension
       v
 api.py -> jobs.py -> service.py -> fact_checker.py
                                       |
+                                      +-> factcheck_core/
+                                      |     claims, retrieval, sources,
+                                      |     verification, prompts, models
+                                      |
                                       +-> Gemini 3.5 Flash-Lite
-                                          (claim extraction, grounded Google
-                                           Search, and evidence verification)
+                                            (claim extraction, grounded Google
+                                             Search, and evidence verification)
 ```
 
 Responsibilities are intentionally separated:
 
 | Component | Responsibility |
 | --- | --- |
-| `fact_checker.py` | Claim extraction, evidence search, verification, verdict derivation, and bounded per-claim concurrency |
+| `fact_checker.py` | Stable public facade, provider retry behavior, and bounded per-claim orchestration |
+| `factcheck_core/` | Pipeline configuration, prompts, result types, claim parsing, source handling, retrieval, and deterministic verification helpers |
 | `providers.py` | Immutable per-job credentials, provider clients, global concurrency gates, and usage accounting |
 | `service.py` | Text validation, URL safety, Jina article retrieval, error sanitization, and shared application entry points |
 | `jobs.py` | Background execution, capability access, capacity limits, cancellation, progress events, snapshots, and event replay |
@@ -89,7 +94,12 @@ results retain their original claim indexes even when they finish out of order.
   LinkedIn are excluded before grounded evidence enters verification.
 - Gemini-synthesized grounded-summary segments that are bound to citation metadata are bounded before they enter a verification prompt.
 - Trusted Google grounding redirects are resolved through a public-URL-only
-  redirect checker, and exports retain both canonical and provider URLs.
+  redirect checker. A failed resolution is exported with a null public URL and
+  an explicit `canonicalResolution: "failed"`; the unresolved provider token is
+  never exposed as a citation.
+- Government, military, international-organization, university, and academic
+  domains receive deterministic source categories instead of falling through
+  to the generic lowest tier.
 - Confidence is recalculated as an auditable evidence-strength score; it is
   not presented as a probability that the claim is true.
 - Provider failures are sanitized before being returned through the API.
@@ -215,6 +225,12 @@ usage metadata. Verification completion, usage-accounting completeness, and
 cost-estimate completeness are exported as separate fields. Replayed SSE events replace cumulative totals instead of adding
 them again.
 
+Exports also include the provider claim count, deterministic duplicate-merge
+count, and final claim count. `split_count` is deliberately `null`: Gemini may
+split compound claims during extraction, but its response does not provide a
+reliable pre-split manifest from which the backend could calculate that value.
+The export reports this limitation rather than inventing a statistic.
+
 Gemini requests use a process-wide concurrency ceiling of three by default.
 Timeouts, 408/409, and
 retryable 5xx failures use bounded exponential backoff with jitter. A 429 is
@@ -315,6 +331,15 @@ fact-checker/
   providers.py
   service.py
   fact_checker.py
+  factcheck_core/
+    claims.py
+    config.py
+    models.py
+    prompts.py
+    protocol.py
+    retrieval.py
+    sources.py
+    verification.py
   public/
   requirements.txt
   requirements-dev.txt

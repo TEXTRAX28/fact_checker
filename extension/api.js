@@ -75,7 +75,7 @@ function clientHeaders(clientId) {
   return clientId ? { "X-Client-Id": clientId } : {};
 }
 
-export function buildCheckPayload({ mode, page, url, text, forceRefresh = false }) {
+export function buildCheckPayload({ mode, page, url, text }) {
   // The backend's CheckRequest field is named `type` and has no force_refresh
   // field (extra="forbid" rejects unknown fields, so sending either breaks
   // every request with a 422).

@@ -442,6 +442,12 @@ test("buildExportData shapes a completed snapshot for export", () => {
       },
     ],
     claim_count: 1,
+    extraction_stats: {
+      provider_claim_count: 2,
+      split_count: null,
+      deduplication_merge_count: 1,
+      final_claim_count: 1,
+    },
   });
   const data = buildExportData(snapshot, { mode: "url", url: "https://example.com/article" });
 
@@ -452,6 +458,7 @@ test("buildExportData shapes a completed snapshot for export", () => {
   assert.equal(data.summary.verificationComplete, true);
   assert.equal(data.summary.usageAccountingComplete, true);
   assert.equal(data.summary.costEstimateComplete, true);
+  assert.equal(data.summary.extractionStats.deduplication_merge_count, 1);
   assert.equal(data.claims.length, 1);
   assert.equal(data.claims[0].verdict, "TRUE");
   assert.equal(data.claims[0].sources[0].url, "https://en.wikipedia.org/wiki/Eiffel_Tower");
@@ -519,6 +526,37 @@ test("exports preserve canonical source and evidence audit metadata", () => {
   assert.equal(data.claims[0].sources[0].providerUrl.includes("vertexaisearch"), true);
   assert.equal(data.claims[0].sources[0].qualityTier, 1);
   assert.equal(data.claims[0].confidenceFactors.model_score_used, false);
+});
+
+test("exports retain failed canonical resolution without leaking provider URL", () => {
+  const providerUrl = "https://vertexaisearch.cloud.google.com/redirect/private-token";
+  const snapshot = normalizeSnapshot({
+    id: "check-unresolved-source",
+    status: "completed",
+    claim_count: 1,
+    results: [{
+      claim_index: 0,
+      claim: "The agency published a report.",
+      verdict: "TRUE",
+      sources: [{
+        url: null,
+        title: "Agency report",
+        domain: "agency.gov",
+        provider_url: providerUrl,
+        canonical_resolution: "failed",
+        displayable: false,
+        evidence_kind: "grounded_summary",
+        is_full_content: false,
+      }],
+    }],
+  });
+
+  const data = buildExportData(snapshot);
+  assert.equal(data.claims[0].sources[0].url, null);
+  assert.equal(data.claims[0].sources[0].canonicalResolution, "failed");
+  assert.equal(data.claims[0].sources[0].evidenceKind, "grounded_summary");
+  assert.doesNotMatch(JSON.stringify(data), /private-token/);
+  assert.match(toMarkdownReport(data), /canonical URL unavailable/);
 });
 
 test("buildExportData includes failed and unfinished claim slots", () => {

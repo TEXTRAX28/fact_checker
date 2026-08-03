@@ -8,24 +8,6 @@ import fact_checker
 from providers import ProviderConcurrencyGate, ProviderContext, ProviderCredentials
 
 
-class FakeChatStream:
-    def __init__(self, *parts):
-        self.parts = parts
-        self.closed = False
-
-    def __iter__(self):
-        return iter([
-            SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=part))])
-            for part in self.parts
-        ])
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        self.closed = True
-
-
 def fake_provider_context(*, gemini=None):
     context = ProviderContext(ProviderCredentials.create("gemini-test-key"))
     context._gemini_client = gemini
@@ -111,6 +93,19 @@ def test_source_ranking_uses_hostname_not_url_substrings():
         "https://en.wikipedia.org/wiki/Example",
         "https://spam.example/?ref=reuters.com",
     ]
+
+
+def test_source_quality_recognizes_government_and_university_domains():
+    assert fact_checker._source_quality("department.example.edu") == (
+        2, "academic_or_research",
+    )
+    assert fact_checker._source_quality("research.ncl.ac.uk") == (
+        2, "academic_or_research",
+    )
+    assert fact_checker._source_quality("ministry.gov.au") == (
+        1, "official_or_primary",
+    )
+    assert fact_checker._source_quality("gov.attacker.example") == (4, "other")
 
 
 def test_domain_normalizes_actual_hostname_not_userinfo_or_port():
@@ -712,6 +707,63 @@ def test_prepare_source_replaces_provider_redirect_with_canonical_url(monkeypatc
     assert prepared["quality_tier"] == 1
 
 
+def test_unresolved_provider_redirect_is_not_exposed_as_a_public_url(monkeypatch):
+    monkeypatch.setattr(
+        fact_checker,
+        "resolve_public_redirect",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            fact_checker.UnsafeUrlError("unsafe redirect")
+        ),
+    )
+    provider_url = (
+        "https://vertexaisearch.cloud.google.com/grounding-api-redirect/token"
+    )
+    prepared = fact_checker._prepare_source({
+        "url": provider_url,
+        "provider_url": provider_url,
+        "publisher_domain": "agency.gov",
+        "title": "Agency report",
+    })
+
+    assert prepared["public_url"] is None
+    assert prepared["canonical_resolution"] == "failed"
+
+    monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: json.dumps([{
+        "claim": "x",
+        "supported": True,
+        "contradicted": False,
+        "verdict": "TRUE",
+        "explanation": "Source [0] supports the claim.",
+        "source_analysis": [{
+            "source_index": 0,
+            "stance": "SUPPORTS",
+            "directness": "DIRECT",
+            "reason": "direct",
+            "evidence_excerpt": "evidence",
+        }],
+    }]))
+    verdict = fact_checker._verify_one(
+        {"claim": "The agency published the report.", "speaker": "A"},
+        "evidence",
+        [{
+            "url": None,
+            "provider_url": provider_url,
+            "title": "Agency report",
+            "domain": "agency.gov",
+            "canonical_url": None,
+            "canonical_resolution": "failed",
+            "displayable": False,
+            "content": "evidence",
+            "evidence_kind": "grounded_summary",
+            "is_full_content": False,
+        }],
+    )
+    assert verdict["sources"][0]["url"] is None
+    assert verdict["sources"][0]["displayable"] is False
+    assert "provider_url" not in verdict["sources"][0]
+    assert provider_url not in str(verdict["sources"])
+
+
 def test_search_claim_uses_one_fallback_only_after_empty_evidence(monkeypatch):
     searched = []
 
@@ -762,6 +814,29 @@ def test_claim_deduplication_is_conservative_and_keeps_provenance():
         claims[0]["claim"], claims[1]["claim"],
     ]
     assert deduplicated[1]["claim"] == claims[2]["claim"]
+
+
+def test_fact_check_reports_honest_extraction_and_merge_statistics(monkeypatch):
+    claims = [
+        {"claim": "The rate was 12 percent.", "query": "rate 12", "speaker": "A"},
+        {"claim": "The rate was 12 percent", "query": "rate 12", "speaker": "A"},
+    ]
+    monkeypatch.setattr(fact_checker, "_chat", lambda *_args, **_kwargs: json.dumps(claims))
+    monkeypatch.setattr(
+        fact_checker, "_search", lambda *_args, **_kwargs: ("evidence", [one_source()])
+    )
+    monkeypatch.setattr(
+        fact_checker, "_verify_one", lambda claim, *_args, **_kwargs: verdict_for(claim)
+    )
+
+    result = fact_checker.fact_check("A sufficiently long factual sentence.")
+
+    assert result.extraction_stats == {
+        "provider_claim_count": 2,
+        "split_count": None,
+        "deduplication_merge_count": 1,
+        "final_claim_count": 1,
+    }
 
 
 def test_grounded_search_timeout_is_bounded_by_remaining_deadline():
@@ -1035,6 +1110,7 @@ def test_verify_one_attaches_source_titles_not_bare_urls(monkeypatch):
     )
     assert verdict["sources"] == [{
         "url": "https://reuters.com/a", "title": "Tariffs announced", "domain": "reuters.com",
+        "is_full_content": True,
     }]
 
 

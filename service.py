@@ -65,6 +65,7 @@ class CheckOutcome:
     normalized_url: str | None = None
     metadata: dict[str, Any] | None = None
     usage: dict[str, Any] = field(default_factory=dict)
+    extraction_stats: dict[str, Any] = field(default_factory=dict)
 
     @property
     def completed_count(self) -> int:
@@ -298,6 +299,9 @@ def _outcome_from_pipeline(pipeline_result, *, metadata=None,
         metadata=metadata,
         normalized_url=normalized_url,
         usage=copy.deepcopy(getattr(pipeline_result, "usage", {})),
+        extraction_stats=copy.deepcopy(
+            getattr(pipeline_result, "extraction_stats", {})
+        ),
     )
 
 

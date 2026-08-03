@@ -1,13 +1,8 @@
-﻿import json
 import copy
-import difflib
 import logging
 import random
-import re
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-
-import httpx
 
 from providers import (
     MAX_PUBLIC_RETRY_AFTER_SECONDS,
@@ -18,70 +13,66 @@ from providers import (
 )
 from url_safety import UnsafeUrlError, resolve_public_redirect
 
+from factcheck_core import retrieval as _retrieval
+from factcheck_core import verification as _verification
+from factcheck_core.claims import _deduplicate_claims
+from factcheck_core.config import (
+    CLAIM_RETRY_DEADLINE_SECONDS,
+    GEMINI_TIMEOUT_SECONDS,
+    MAX_CLAIMS,
+    MAX_EMPTY_SEARCH_PASSES,
+    MAX_EVIDENCE_PER_SOURCE_CHARS,
+    MAX_EVIDENCE_TOTAL_CHARS,
+    MIN_INPUT_NON_WHITESPACE,
+    PROVIDER_MAX_RETRIES,
+    PROVIDER_RETRY_INITIAL_SECONDS,
+    PROVIDER_RETRY_JITTER_SECONDS,
+    PROVIDER_RETRY_MAX_SECONDS,
+    SEARCH_WORKERS,
+    VERIFY_BACKLOG_MULTIPLIER,
+    VERIFY_WORKERS,
+    WHOLE_JOB_DEADLINE_SECONDS,
+)
+from factcheck_core.models import (
+    FactCheckResult,
+    NoEvidenceError,
+    ProviderBackoffCancelled,
+    ProviderProtocolError,
+    WholeJobDeadlineExceeded,
+)
+from factcheck_core.prompts import (
+    EXTRACT_PROMPT,
+    EXTRACT_RESPONSE_FORMAT,
+    MODEL,
+    SEARCH_PROMPT,
+    VERIFY_PROMPT,
+    VERIFY_RESPONSE_FORMAT,
+)
+from factcheck_core.protocol import _parse_provider_array
+from factcheck_core.sources import (
+    _GROUNDING_REDIRECT_DOMAINS,
+    _domain,
+    _domain_matches,
+    _filter_sources,
+    _grounded_sources,
+    _grounding_metadata,
+    _source_domain,
+    _source_quality,
+    _unique_search_query_count,
+)
+from factcheck_core.verification import (
+    _CONFIDENCE_CAP_NO_DIRECT_SOURCE,
+    _aggregate_stance,
+    _calculate_confidence,
+    _detect_supported_language,
+    _language_safe_explanation,
+    _no_evidence_verdict,
+    _one_based_source_references,
+    _validate_source_analysis,
+    _verify_evidence_excerpt,
+)
+
 logger = logging.getLogger(__name__)
-
-SEARCH_WORKERS = 4
-VERIFY_WORKERS = 3
-MAX_CLAIMS = 15
-MIN_INPUT_NON_WHITESPACE = 10
-GEMINI_TIMEOUT_SECONDS = 40.0
-WHOLE_JOB_DEADLINE_SECONDS = 300.0
-CLAIM_RETRY_DEADLINE_SECONDS = 60.0
-PROVIDER_MAX_RETRIES = 3
-PROVIDER_RETRY_INITIAL_SECONDS = 1.0
-PROVIDER_RETRY_MAX_SECONDS = 8.0
-PROVIDER_RETRY_JITTER_SECONDS = 0.5
-MAX_EVIDENCE_PER_SOURCE_CHARS = 4_000
-MAX_EVIDENCE_TOTAL_CHARS = 10_000
-VERIFY_BACKLOG_MULTIPLIER = 2
-MAX_EMPTY_SEARCH_PASSES = 2
-
-_LANGUAGE_MARKERS = {
-    "English": frozenset({
-        "the", "and", "are", "is", "was", "were", "this", "that", "these",
-        "those", "to", "from", "for", "with", "without", "into", "because",
-        "when", "which", "can", "cannot", "could", "would", "should", "will",
-        "has", "have", "had", "you", "your", "their", "our", "not", "claim",
-        "evidence", "source", "supports", "contradicts",
-    }),
-    "Indonesian": frozenset({
-        "yang", "dan", "adalah", "merupakan", "ini", "itu", "tersebut", "dengan",
-        "tanpa", "karena", "ketika", "dari", "untuk", "pada", "dalam", "dapat",
-        "bisa", "tidak", "bukan", "akan", "telah", "sudah", "memiliki", "klaim",
-        "bukti", "sumber", "menyatakan", "namun", "tetapi", "secara", "bahwa",
-        "oleh", "hanya", "mendukung", "membantah",
-    }),
-}
-
-class NoEvidenceError(Exception):
-    # Raised when a claim has zero search evidence to verify against (search failed or returned nothing usable). 
-    pass
-
-
-class ProviderProtocolError(Exception):
-    """Raised when provider output does not satisfy the expected JSON protocol."""
-
-
-class WholeJobDeadlineExceeded(TimeoutError):
-    """Raised when the complete fact-check has exhausted its wall-clock budget."""
-
-
-class ProviderBackoffCancelled(RuntimeError):
-    """Raised when cancellation interrupts a provider retry delay."""
-
-
-class FactCheckResult(list):
-    """List-compatible pipeline result with enough metadata for service adapters."""
-
-    def __init__(self, values=(), *, status: str = "completed", claim_count: int = 0,
-                 errors: list[dict] | None = None,
-                 usage: dict | None = None):
-        super().__init__(values)
-        self.status = status
-        self.claim_count = claim_count
-        self.errors = errors or []
-        self.usage = usage or {}
-
 
 def _safe_callback(callback, value, label: str) -> None:
     if callback is None:
@@ -186,259 +177,6 @@ def _public_provider_error(stage: str, exc: Exception,
             error["retry_after_seconds"] = info.retry_after_seconds
     return error
 
-MODEL = "gemini-3.5-flash-lite"
-
-EXTRACT_PROMPT = """Extract up to 15 most specific and verifiable factual claims from the text.
-Return a JSON array. Each item must have:
-  "claim": a faithful, self-contained version of the factual claim. Preserve names, numbers,
-           units, dates, and the source's wording wherever possible so the claim can still be
-           located in the original text. Remove rhetorical intensifiers or subjective framing
-           (such as "dangerous metabolic tidal wave", "violent", or "brutal") that cannot be
-           independently verified. Never add a fact or inference that the source did not state.
-  "query": a short search query that targets the underlying FACT, not just the names in the claim.
-           e.g. for "X is president of Indonesia" use "current president of Indonesia" so the real
-           answer is findable and the claim can be disproved if false.
-           Include the specific named person, company, or organization tied to the claim so the
-           query surfaces primary/official sources instead of generic aggregator or stats sites.
-           e.g. for "ChatGPT reached one million users in five days" use
-           "OpenAI Sam Altman ChatGPT one million users five days", not just "ChatGPT million users".
-  "speaker": the name or label of who made the claim (e.g. "Senator Davis", "SPEAKER_A"), use "UNKNOWN" only if truly unidentifiable
-
-Only include: statistics, numbers, dates, named events, quotes, scientific/medical/legal/historical
-facts, and factual-sounding assertions about a named person or entity (identity, role, personal
-attributes) even if sensitive or likely hard to verify.
-Skip: subjective value judgments (e.g. "X is a bad person"), predictions, vague statements,
-rhetorical questions. Do NOT skip a factual-sounding claim just because it's sensitive, personal,
-or likely unverifiable (e.g. a claim about someone's identity, orientation, or private life) -
-extract it; the verifier will return UNVERIFIABLE if no evidence exists either way.
-If one sentence mixes checkable facts with rhetoric, extract only the factual core. If it combines
-independent factual assertions that could receive different verdicts, split them into separate
-claims. Keep tightly related quantities together only when they describe one calculation or whole.
-Also skip routine procedural narration the source already states as plain, undisputed fact (a plea
-entered, a filing date, a standard step in a legal/administrative process), UNLESS it contains a
-specific number, quote, or attribution that could plausibly be misreported. Routine narration has
-near-zero misinformation risk and isn't worth a search+verify call.
-
-If two or more figures are stated as complementary parts of one whole (a percentage split, a
-budget breakdown, a ratio that sums to a total), extract them as ONE claim describing the full
-breakdown, not one claim per figure. e.g. for "60% from nilai manfaat, 40% from Bipih" extract
-a single claim "the scheme is 60% nilai manfaat and 40% Bipih", not two separate claims. Splitting
-them risks one being verified TRUE and the other FALSE even though they're the same fact.
-For a claim about a named authority's limit, guideline, or recommendation, make the query target
-that authority's official guidance and include the quantity being compared. For a calculated claim,
-query for the underlying per-unit values and the named benchmark, not the dramatic conclusion.
-Do not return duplicate or substantially equivalent claims when the text restates the same event,
-ruling, policy, quotation, or statistic. Keep the clearest self-contained formulation and preserve
-the earliest occurrence. Before returning, audit every proposed claim: if it contains independent
-clauses that could receive different verdicts or need different evidence, split them into separate
-claims. In particular, separate different rates, policies, dates, institutions, or actions joined by
-"and", "while", "alongside", or a semicolon. Do not split a date, unit, attribution, or necessary
-qualifier away from the proposition it describes.
-For policy claims, preserve whether the text says announced, signed, scheduled, effective,
-implemented, suspended, or currently active. Do not rewrite one temporal state as another.
-Return [] if nothing is checkable.
-Return ONLY the JSON array, no other text."""
-
-VERIFY_PROMPT = """You are a fact-checker. Output ONLY a JSON array. No markdown. No analysis. No prose. Just the JSON array.
-
-Each object in the array must have:
-  "speaker": the speaker label
-  "claim": the original claim text
-  "supported": true ONLY if the evidence explicitly and directly confirms the claim. False otherwise,
-               including when the evidence is simply silent or missing, silence is not support.
-  "contradicted": true ONLY if the evidence explicitly and directly contradicts the claim (denies
-                   the event, states a number that changes the claim's meaning, not just a rounding/
-                   date/conversion difference, see NUMERIC TOLERANCE below before marking any numeric
-                   mismatch as contradicted), OR the claim is comparative/superlative and fails the
-                   historical-comparison test below. False if the evidence is merely silent, absent,
-                   or doesn't mention the claim at all, absence is not contradiction.
-  "verdict": one of TRUE / UNVERIFIABLE / FALSE, this field is informational only and will be
-             recomputed from "supported"/"contradicted" downstream, but fill it in consistently:
-             supported=true & contradicted=false -> TRUE
-             contradicted=true & supported=false -> FALSE
-             anything else (neither, or both) -> UNVERIFIABLE
-  "explanation": 1-3 sentences, written in the SAME language as the claim text (e.g. claim in
-                 Indonesian -> explanation in Indonesian, claim in English -> explanation in
-                 English). Never mix languages within one explanation, regardless of what
-                 language the search results/sources are in. Write each source_analysis "reason"
-                 in that language too.
-  "source_analysis": array with exactly one entry per numbered source shown in SEARCH
-                      RESULTS below. Reference sources ONLY by the [N] index shown there -
-                      never invent an index and never use a URL. Each entry:
-                        "source_index": the [N] number of the source
-                        "stance": one of SUPPORTS / CONTRADICTS / PARTIAL / IRRELEVANT / INSUFFICIENT
-                        "directness": DIRECT if the source addresses the exact entity, number,
-                                      and timeframe in the claim; INDIRECT if only generally related
-                        "reason": one short sentence
-                        "evidence_excerpt": a short exact quote (under 25 words) from the
-                                            supplied GROUNDED SUMMARY supporting the stance,
-                                            or null if the stance is IRRELEVANT or
-                                            INSUFFICIENT. The supplied text is a
-                                            Gemini-synthesized grounded segment, not a
-                                            verbatim quote from the publisher.
-
-SOURCE_ANALYSIS DEFINITIONS:
-  SUPPORTS = this source directly and explicitly confirms the claim.
-  CONTRADICTS = this source directly and explicitly denies or contradicts the claim.
-  PARTIAL = this source confirms only part of a compound or qualified claim, not all of it.
-  IRRELEVANT = this source discusses the same general topic but does not address the
-               claim's specific entity, number, or timeframe - topical relevance alone is
-               never SUPPORTS.
-  INSUFFICIENT = this source might be relevant but lacks enough detail to decide either way.
-
-"supported" and "contradicted" above must be consistent with source_analysis: set
-supported=true only if at least one entry is SUPPORTS, and contradicted=true only if at
-least one entry is CONTRADICTS. These two fields will also be recomputed downstream
-directly from source_analysis, so an inconsistency here will be corrected automatically -
-but make them agree in the first place.
-
-The most common mistake is treating "I found no evidence either way" as FALSE. It is not, that is
-UNVERIFIABLE. Only mark FALSE when the evidence actively says something different from the claim,
-never because the evidence is merely absent or thin.
-
-NUMERIC TOLERANCE (apply this BEFORE setting contradicted=true on any numeric claim):
-A numeric claim is NOT contradicted just because a source states a different specific number.
-Sources routinely round, convert currency, measure from a different baseline, or report a different
-date. Only set contradicted=true if the gap is large enough to change what a reader would take away
-from the claim, roughly: off by more than ~10%, off by an order of magnitude, or it crosses a
-meaningful threshold the claim depends on (e.g. "over 1 million" vs an actual 800,000 changes the
-claim's meaning; "1.05 million" vs an actual 1 million does not). If multiple sources disagree
-slightly among themselves (e.g. 324m vs 330m for the same structure), that spread itself signals
-normal measurement/rounding variance, not grounds to contradict a claim landing near that range.
-This applies to ANY numeric claim, not just money: heights, distances, dates, counts, percentages.
-e.g. a claim of "$125m in losses" against a source saying "$120m" is supported, not contradicted,
-and a claim of "approximately 335 meters" against sources saying 324m-330m is supported, not
-contradicted, small measurement variance is not a fabrication.
-
-CALCULATIONS AND GUIDELINE COMPARISONS:
-Perform basic arithmetic and standard unit conversions when the accepted evidence supplies the
-inputs. A source that states a per-unit amount can directly support a claimed total for multiple
-identical units; do not mark the total UNVERIFIABLE merely because the source did not print the
-multiplication result. Show the calculation briefly in the explanation. For example, four packages
-with 25 g each directly support a 100 g total. Likewise, recalculate a percentage comparison before
-choosing a stance: 87 compared with a limit of 30 is 290%, which reasonably supports
-"nearly 300%."
-
-When a claim names an organization's recommendation, distinguish its main recommendation from a
-stricter conditional or aspirational target. Judge the claim against the benchmark it actually
-names; do not silently replace that benchmark with a different recommendation. Before returning,
-check that every calculation in the explanation agrees with the selected source stances,
-supported/contradicted fields, and verdict.
-
-EVIDENCE ABOUT A DIFFERENT INSTANCE IS NOT THE SAME AS NO EVIDENCE:
-If the search results discuss a different specific instance of a similar recurring subject (a
-different session, year, edition, or version than the one named in the claim), that is not the
-same as finding zero evidence. Do not use it to support or contradict the claim (still
-UNVERIFIABLE, leave both false), but say so explicitly in the explanation, e.g. "sources cover the
-78th session, not the 80th session named in the claim" rather than a generic "no evidence found."
-
-COMPARATIVE AND SUPERLATIVE CLAIMS (CRITICAL):
-If the claim contains comparative or superlative phrases like "nearer than ever before", "best ever", "highest ever", "more than before", "closest ever", "farthest ever", "one of the largest", "unprecedented", it requires DIFFERENT evidence than general claims.
-
-For these claims:
-  - Do NOT accept general trend data (e.g., "improving" or "growing") as proof of "closer than ever"
-  - Require explicit historical comparison: minimum/maximum values, time-series data, or direct statements comparing current vs past
-  - If the sources show ONLY that the subject is improving but provide NO historical minimum/maximum or time-series comparison, leave both supported and contradicted false (UNVERIFIABLE) - the specific superlative hasn't been proven, but general trend data isn't evidence against it either
-  - If the sources provide clear historical data showing this IS the closest/best/highest point, set supported=true
-  - Only set contradicted=true if the sources show the OPPOSITE: historical data proving some past point was actually closer/better/higher than now
-
-Example: "Indonesia is nearer than ever before to ending poverty" + sources showing only "progress in poverty reduction" = UNVERIFIABLE (progress is not the same as "closest ever," but it's not evidence against it either). Only set supported=true if you find historical poverty rates proving current levels are lowest ever; only set contradicted=true if you find historical rates proving a past level was actually lower.
-
-If the claim is about a CURRENT or ONGOING state (who currently holds office, live negotiations, present-day support), and the sources do not contain recent, direct evidence, leave both supported and contradicted false (UNVERIFIABLE). Do NOT infer a verdict from general or historical information.
-
-ATTRIBUTIONS AND TEMPORAL STATUS:
-For "Person said X", first decide whether the evidence establishes that the person made the
-statement. Do not claim that X itself is objectively true unless the claim asks for that separate
-proposition and the evidence establishes it. For policies, distinguish announcement, signing,
-legal imposition, effective date, collection, suspension, expiration, and current status. Treat a
-source that proves only a different temporal state as PARTIAL, and name the qualification in the
-explanation. Explain what the strongest source actually states and why that evidence produces the
-verdict; do not use a bare phrase such as "multiple sources confirm the claim."
-
-YOUR ENTIRE RESPONSE MUST BE A VALID JSON ARRAY STARTING WITH [ AND ENDING WITH ]. NOTHING ELSE."""
-
-
-EXTRACT_RESPONSE_FORMAT = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "extracted_claims",
-        "strict": True,
-        "schema": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "claim": {"type": "string"},
-                    "query": {"type": "string"},
-                    "speaker": {"type": "string"},
-                },
-                "required": ["claim", "query", "speaker"],
-                "additionalProperties": False,
-            },
-        },
-    },
-}
-
-VERIFY_RESPONSE_FORMAT = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "claim_verification",
-        "strict": True,
-        "schema": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "speaker": {"type": "string"},
-                    "claim": {"type": "string"},
-                    "supported": {"type": "boolean"},
-                    "contradicted": {"type": "boolean"},
-                    "verdict": {
-                        "type": "string",
-                        "enum": ["TRUE", "FALSE", "UNVERIFIABLE"],
-                    },
-                    "explanation": {"type": "string"},
-                    "source_analysis": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "source_index": {"type": "integer", "minimum": 0},
-                                "stance": {
-                                    "type": "string",
-                                    "enum": [
-                                        "SUPPORTS", "CONTRADICTS", "PARTIAL",
-                                        "IRRELEVANT", "INSUFFICIENT",
-                                    ],
-                                },
-                                "directness": {
-                                    "type": "string",
-                                    "enum": ["DIRECT", "INDIRECT"],
-                                },
-                                "reason": {"type": "string"},
-                                "evidence_excerpt": {
-                                    "anyOf": [{"type": "string"}, {"type": "null"}],
-                                },
-                            },
-                            "required": [
-                                "source_index", "stance", "directness", "reason",
-                                "evidence_excerpt",
-                            ],
-                            "additionalProperties": False,
-                        },
-                    },
-                },
-                "required": [
-                    "speaker", "claim", "supported", "contradicted", "verdict",
-                    "explanation", "source_analysis",
-                ],
-                "additionalProperties": False,
-            },
-        },
-    },
-}
-
-
 def _chat(system: str, user: str, max_tokens: int, *, deadline: float | None = None,
           response_format: dict | None = None,
           provider_context: ProviderContext | None = None,
@@ -538,308 +276,14 @@ def _chat(system: str, user: str, max_tokens: int, *, deadline: float | None = N
                 raise
     raise AssertionError("Gemini retry loop exhausted without returning or raising.")
 
-def _parse_provider_array(text: str) -> tuple[list, bool]:
-    text = re.sub(r"```(?:json)?\n?|```", "", text)
-    # quote bare enums (e.g. "verdict": TRUE -> "verdict": "TRUE"). Anchored to the "verdict" key specifically, not just any ": TRUE"/": FALSE" otherwise a colon inside an explanation string gets corrupted too.
-    text = re.sub(r'("verdict"\s*:\s*)(UNVERIFIABLE|TRUE|FALSE)\b', r'\1"\2"', text)
-    text = re.sub(r",\s*([}\]])", r"\1", text)  # Remove trailing commas
-    # Strip backslash-escapes JSON doesn't recognize (e.g. "\_", a markdown-style
-    # underscore escape the model sometimes emits in legal citations like "607 U.S. \_\_\_"),
-    # a real, live-reproduced cause of raw_decode failing on an otherwise-valid response.
-    # Consumes escape pairs atomically so a valid "\\" isn't split into "\" + a stray second
-    # backslash that then looks invalid on its own.
-    text = re.sub(r'\\(.)', lambda m: m.group(0) if m.group(1) in '"\\/bfnrtu' else m.group(1), text)
-
-    # Full array parse first, via raw_decode from the first '[' rather than a regex
-    # spanning greedily to the LAST ']' in the text - a stray bracket in trailing
-    # prose after a genuinely complete array must not corrupt an otherwise-good match.
-    decoder = json.JSONDecoder()
-    start = text.find("[")
-    if start != -1:
-        try:
-            parsed, _ = decoder.raw_decode(text, start)
-            if isinstance(parsed, list):
-                return parsed, True
-        except json.JSONDecodeError:
-            pass
-
-    # Fallback: scan for complete top-level objects using the JSON parser itself, not
-    # a `{[^{}]*}` regex - that regex explicitly excludes nested braces, so a claim
-    # or sources value that isn't a plain string (a real, confirmed cause of
-    # ProviderProtocolError, not a guess) silently matched nothing. Runs even when
-    # the array is truncated mid-output (no closing ]); keeps every complete object
-    # found before the cutoff, same as before.
-    objects = []
-    pos = 0
-    while pos < len(text):
-        brace = text.find("{", pos)
-        if brace == -1:
-            break
-        try:
-            obj, end = decoder.raw_decode(text, brace)
-            if isinstance(obj, dict):
-                objects.append(obj)
-            pos = end
-        except json.JSONDecodeError:
-            pos = brace + 1
-    return objects, bool(objects)
-
-
-def _parse_json_array(text: str) -> list:
-    return _parse_provider_array(text)[0]
-
-
-def _claim_tokens(value: str) -> set[str]:
-    return set(re.findall(r"[a-z0-9]+", str(value).casefold()))
-
-
-def _deduplicate_claims(claims: list[dict]) -> list[dict]:
-    """Merge only exact or near-identical lexical restatements; avoid semantic guesses."""
-    unique: list[dict] = []
-    original_indices: list[list[int]] = []
-    for original_index, claim in enumerate(claims):
-        text = re.sub(r"\s+", " ", str(claim.get("claim", ""))).strip()
-        tokens = _claim_tokens(text)
-        numbers = set(re.findall(r"\d+(?:[.,]\d+)*", text))
-        duplicate_index = None
-        for index, existing in enumerate(unique):
-            existing_text = str(existing.get("claim", ""))
-            existing_tokens = _claim_tokens(existing_text)
-            union = tokens | existing_tokens
-            overlap = len(tokens & existing_tokens) / len(union) if union else 0.0
-            exact = text.casefold() == existing_text.casefold()
-            same_numbers = numbers == set(re.findall(r"\d+(?:[.,]\d+)*", existing_text))
-            if exact or (same_numbers and overlap >= 0.88):
-                duplicate_index = index
-                break
-        if duplicate_index is None:
-            unique.append(dict(claim))
-            original_indices.append([original_index])
-            continue
-
-        original_indices[duplicate_index].append(original_index)
-        existing = unique[duplicate_index]
-        existing["merged_from"] = list(original_indices[duplicate_index])
-        existing["original_claims"] = [
-            str(claims[index].get("claim", ""))
-            for index in original_indices[duplicate_index]
-        ]
-        logger.info("Merged duplicate extracted claim %d into %d",
-                    original_index, original_indices[duplicate_index][0])
-    return unique
-
-_LOW_QUALITY = (
-    "facebook.com", "youtube.com", "youtu.be", "twitter.com", "x.com",
-    "instagram.com", "tiktok.com", "reddit.com", "quora.com",
-    "pinterest.com", "threads.net", "medium.com", "linkedin.com",
-)
-
-_PRIMARY_QUALITY = (
-    ".gov", ".gov.uk", ".go.id", ".gc.ca", "canada.ca", "who.int",
-    "worldbank.org", "un.org", "imf.org",
-)
-
-_REPUTABLE_NEWS = (
-    "reuters.com", "apnews.com", "bbc.com", "bbc.co.uk", "nytimes.com",
-)
-
-_RESEARCH_QUALITY = (
-    "nature.com", "sciencedirect.com",
-)
-
-_GROUNDING_REDIRECT_DOMAINS = (
-    "vertexaisearch.cloud.google.com",
-)
-
-# Not blocked, ranked below explicit high-quality sources but above unrecognized domains
-_MEDIUM_QUALITY = (
-    "wikipedia.org",
-)
-
-def _domain(url: str) -> str:
-    from urllib.parse import urlparse
-    try:
-        hostname = (urlparse(url).hostname or "").lower().rstrip(".")
-    except ValueError:
-        return ""
-    if hostname.startswith("www."):
-        hostname = hostname[4:]
-    return hostname
-
-def _domain_matches(netloc: str, domain: str) -> bool:
-    # Matches the real host, not a substring anywhere in the URL - a query param
-    # like "?ref=reuters.com" on a spam domain must NOT count as reuters.com.
-    if domain.startswith("."):
-        return netloc.endswith(domain)
-    return netloc == domain or netloc.endswith("." + domain)
-
-
-def _title_domain(title) -> str:
-    if not isinstance(title, str):
-        return ""
-    value = title.strip().lower().removeprefix("www.").rstrip(".")
-    if not value or " " in value or not re.fullmatch(r"[a-z0-9.-]+", value):
-        return ""
-    return value if "." in value else ""
-
-
-def _source_domain(source: dict) -> str:
-    return (
-        _domain(source.get("canonical_url", ""))
-        or str(source.get("publisher_domain") or "")
-        or _domain(source.get("url", ""))
+def _prepare_source(source: dict, deadline: float | None = None) -> dict:
+    return _retrieval.prepare_source(
+        source,
+        deadline,
+        bounded_timeout=_bounded_timeout,
+        resolve_redirect=resolve_public_redirect,
     )
 
-
-def _source_quality(domain: str) -> tuple[int, str]:
-    if any(_domain_matches(domain, item) for item in _PRIMARY_QUALITY):
-        return 1, "official_or_primary"
-    if any(_domain_matches(domain, item) for item in _REPUTABLE_NEWS):
-        return 2, "reputable_news"
-    if any(_domain_matches(domain, item) for item in _RESEARCH_QUALITY):
-        return 2, "research"
-    if any(_domain_matches(domain, item) for item in _MEDIUM_QUALITY):
-        return 3, "secondary_reference"
-    return 4, "other"
-
-def _filter_sources(results: list[dict]) -> list[dict]:
-    # Prefer high-quality domains among the grounded citations that remain after filtering.
-    def rank(r):
-        return _source_quality(_source_domain(r))[0]
-
-    results.sort(key=rank)
-    return results[:3]
-
-SEARCH_PROMPT = """Search the web for evidence about the factual claim below.
-Return a concise evidence brief containing only facts that the cited web sources actually state.
-Prefer primary, official, academic, and established news sources. Use multiple independent sources
-when available. Do not decide a TRUE/FALSE verdict and do not rely on your training knowledge.
-The separate verification stage will judge the claim using only this grounded evidence.
-
-CLAIM:
-"""
-
-
-def _field(value, name: str, default=None):
-    if isinstance(value, dict):
-        return value.get(name, default)
-    return getattr(value, name, default)
-
-
-def _grounding_metadata(response):
-    candidates = _field(response, "candidates", []) or []
-    if not candidates:
-        return None
-    return _field(candidates[0], "grounding_metadata")
-
-
-def _unique_search_query_count(metadata) -> int | None:
-    queries = _field(metadata, "web_search_queries")
-    if queries is None:
-        return None
-    return len({
-        str(query).strip()
-        for query in queries
-        if isinstance(query, str) and query.strip()
-    })
-
-
-def _grounded_sources(response) -> list[dict]:
-    metadata = _grounding_metadata(response)
-    chunks = _field(metadata, "grounding_chunks", []) or []
-    supports = _field(metadata, "grounding_supports", []) or []
-    source_segments: dict[int, list[str]] = {}
-    for support in supports:
-        segment = _field(support, "segment")
-        text = _field(segment, "text", "")
-        if not isinstance(text, str) or not text.strip():
-            continue
-        for index in _field(support, "grounding_chunk_indices", []) or []:
-            if isinstance(index, int):
-                source_segments.setdefault(index, []).append(text.strip())
-
-    results = []
-    seen_urls = set()
-    for index, chunk in enumerate(chunks):
-        web = _field(chunk, "web")
-        url = _field(web, "uri")
-        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
-            continue
-        title = _field(web, "title") or None
-        actual_domain = _domain(url)
-        if not actual_domain:
-            continue
-        title_domain = _title_domain(title)
-        trusted_redirect = any(
-            _domain_matches(actual_domain, domain)
-            for domain in _GROUNDING_REDIRECT_DOMAINS
-        )
-        publisher_domain = title_domain if trusted_redirect and title_domain else actual_domain
-        if url in seen_urls or any(
-            _domain_matches(actual_domain, blocked)
-            or (title_domain and _domain_matches(title_domain, blocked))
-            for blocked in _LOW_QUALITY
-        ):
-            continue
-        seen_urls.add(url)
-        segments = list(dict.fromkeys(source_segments.get(index, [])))
-        content = "\n".join(segments).strip()
-        if not content:
-            # A citation without a support-segment mapping is not evidence.
-            continue
-        results.append({
-            "url": url,
-            "provider_url": url if trusted_redirect else None,
-            "canonical_url": None,
-            "title": title,
-            "domain": publisher_domain,
-            "publisher_domain": publisher_domain,
-            "provider_domain": actual_domain,
-            "content": content,
-            "is_full_content": False,
-            "evidence_kind": "grounded_summary",
-        })
-    return results
-
-
-def _prepare_source(source: dict, deadline: float | None = None) -> dict:
-    """Attach auditable source metadata and resolve trusted provider redirects."""
-    prepared = dict(source)
-    provider_url = prepared.get("provider_url")
-    if provider_url:
-        try:
-            canonical_url = resolve_public_redirect(
-                provider_url,
-                timeout_seconds=_bounded_timeout(2.0, deadline),
-            )
-        except WholeJobDeadlineExceeded:
-            raise
-        except (UnsafeUrlError, httpx.HTTPError, OSError, TimeoutError) as exc:
-            logger.warning("Canonical source URL resolution failed (%s)", type(exc).__name__)
-            prepared["canonical_url"] = None
-            prepared["canonical_resolution"] = "failed"
-        else:
-            canonical_domain = _domain(canonical_url)
-            if canonical_domain and not any(
-                _domain_matches(canonical_domain, item)
-                for item in _GROUNDING_REDIRECT_DOMAINS
-            ):
-                prepared["canonical_url"] = canonical_url
-                prepared["url"] = canonical_url
-                prepared["domain"] = canonical_domain
-                prepared["publisher_domain"] = canonical_domain
-                prepared["canonical_resolution"] = "resolved"
-            else:
-                prepared["canonical_url"] = None
-                prepared["canonical_resolution"] = "failed"
-    else:
-        prepared["canonical_url"] = prepared.get("url")
-        prepared["canonical_resolution"] = "not_required"
-
-    quality_tier, source_type = _source_quality(_source_domain(prepared))
-    prepared["quality_tier"] = quality_tier
-    prepared["source_type"] = source_type
-    return prepared
 
 def _search(
     query: str,
@@ -848,143 +292,19 @@ def _search(
     claim_index: int | None = None,
     cancel_event=None,
 ) -> tuple[str, list[dict]]:
-    providers = provider_context or ProviderContext.from_environment()
-    for attempt in range(PROVIDER_MAX_RETRIES + 1):
-        usage_recorded = False
-        try:
-            if cancel_event is not None and cancel_event.is_set():
-                raise ProviderBackoffCancelled("Provider request was cancelled.")
-            providers.raise_if_rate_limited()
-            request_timeout = _bounded_timeout(GEMINI_TIMEOUT_SECONDS, deadline)
-            slot_timeout = (
-                request_timeout
-                if providers.concurrency_limited
-                else None
-            )
-            with providers.gemini_slot(slot_timeout):
-                if cancel_event is not None and cancel_event.is_set():
-                    raise ProviderBackoffCancelled("Provider request was cancelled.")
-                providers.raise_if_rate_limited()
-                from google.genai import types
-
-                response = providers.gemini_client(
-                    timeout=GEMINI_TIMEOUT_SECONDS,
-                ).models.generate_content(
-                    model=MODEL,
-                    contents=SEARCH_PROMPT + query,
-                    config=types.GenerateContentConfig(
-                        tools=[types.Tool(google_search=types.GoogleSearch())],
-                        max_output_tokens=1200,
-                        thinking_config=types.ThinkingConfig(
-                            thinking_level=types.ThinkingLevel.MINIMAL
-                        ),
-                        http_options=types.HttpOptions(
-                            timeout=max(1, int(request_timeout * 1000)),
-                            retry_options=types.HttpRetryOptions(attempts=1),
-                        ),
-                    ),
-                )
-            metadata = _grounding_metadata(response)
-            providers.usage.record_gemini(
-                model=MODEL,
-                stage="search",
-                claim_index=claim_index,
-                attempt=attempt + 1,
-                usage=getattr(response, "usage_metadata", None),
-                succeeded=True,
-                search_query_count=_unique_search_query_count(metadata),
-            )
-            usage_recorded = True
-            _remaining_seconds(deadline)
-            break
-        except Exception as exc:
-            if isinstance(exc, (ProviderRateLimitCircuitOpen, ProviderBackoffCancelled)):
-                raise
-            if (
-                _is_rate_limited(exc)
-            ):
-                providers.trip_rate_limit(exc)
-                if not usage_recorded:
-                    providers.usage.record_gemini(
-                        model=MODEL,
-                        stage="search",
-                        claim_index=claim_index,
-                        attempt=attempt + 1,
-                        succeeded=False,
-                    )
-                raise
-            if not usage_recorded and not isinstance(
-                exc, ProviderRateLimitCircuitOpen
-            ):
-                providers.usage.record_gemini(
-                    model=MODEL,
-                    stage="search",
-                    claim_index=claim_index,
-                    attempt=attempt + 1,
-                    succeeded=False,
-                )
-            logger.warning(
-                "Gemini grounded-search attempt %d failed (%s)",
-                attempt + 1,
-                type(exc).__name__,
-            )
-            if (isinstance(exc, WholeJobDeadlineExceeded)
-                    or attempt >= PROVIDER_MAX_RETRIES
-                    or not _is_retryable(exc)):
-                raise
-            if not _sleep_before_retry(attempt, deadline, exc, cancel_event):
-                if not _is_rate_limited(exc):
-                    raise WholeJobDeadlineExceeded(
-                        "The fact-check exceeded its time limit."
-                    ) from exc
-                raise
-    accepted = [
-        _prepare_source(source, deadline)
-        for source in _filter_sources(_grounded_sources(response))
-    ]
-
-    # sources[i] and the "[i] ..." block in the evidence text refer to the same
-    # source by construction - this index (not the URL) is what the model is
-    # asked to cite in source_analysis, so a malformed/truncated URL in the
-    # model's output can never misattribute an analysis to the wrong source.
-    sources = []
-    text_parts = []
-    evidence_size = 0
-    for r in accepted:
-        url = r["url"]
-        is_full_content = bool(r.get("is_full_content"))
-        body = r.get("content", "")
-        if not isinstance(body, str) or not body.strip():
-            continue
-        index = len(sources)
-        header = (
-            f"[{index}] {url}\n"
-            "GROUNDED SUMMARY (Gemini-synthesized; not a verbatim publisher excerpt):\n"
-        )
-        separator_size = 2 if text_parts else 0
-        remaining = (MAX_EVIDENCE_TOTAL_CHARS - evidence_size
-                     - separator_size - len(header))
-        if remaining <= 0:
-            break
-        excerpt = body[:min(MAX_EVIDENCE_PER_SOURCE_CHARS, remaining)]
-        sources.append({
-            "url": url,
-            "canonical_url": r.get("canonical_url"),
-            "provider_url": r.get("provider_url"),
-            "title": r.get("title") or None,
-            "domain": r.get("domain") or _domain(url),
-            "source_type": r.get("source_type", "other"),
-            "quality_tier": r.get("quality_tier", 4),
-            "canonical_resolution": r.get("canonical_resolution", "not_required"),
-            "content": excerpt,
-            "is_full_content": is_full_content,
-            "evidence_kind": "grounded_summary",
-        })
-        text_parts.append(header + excerpt)
-        evidence_size += separator_size + len(header) + len(excerpt)
-
-    text = "\n\n".join(text_parts)
-    return text, sources
+    return _retrieval.search(
+        query,
+        deadline,
+        provider_context,
+        claim_index,
+        cancel_event,
+        bounded_timeout=_bounded_timeout,
+        remaining_seconds=_remaining_seconds,
+        is_rate_limited=_is_rate_limited,
+        is_retryable=_is_retryable,
+        sleep_before_retry=_sleep_before_retry,
+        prepare_source_func=_prepare_source,
+    )
 
 
 def _search_claim(
@@ -994,461 +314,33 @@ def _search_claim(
     claim_index: int | None = None,
     cancel_event=None,
 ) -> tuple[str, list[dict], list[str]]:
-    """Search once normally, then use the claim text only when no evidence survives."""
-    candidates = []
-    for value in (claim.get("query"), claim.get("claim")):
-        if not isinstance(value, str) or not value.strip():
-            continue
-        normalized = re.sub(r"\s+", " ", value).strip()
-        if normalized.casefold() not in {item.casefold() for item in candidates}:
-            candidates.append(normalized)
-
-    attempted = []
-    for query in candidates[:MAX_EMPTY_SEARCH_PASSES]:
-        attempted.append(query)
-        text, sources = _search(
-            query, deadline, provider_context, claim_index, cancel_event,
-        )
-        if text:
-            annotated_sources = []
-            for source in sources:
-                if isinstance(source, dict):
-                    source = dict(source)
-                    source["search_query"] = query
-                    source["search_attempt"] = len(attempted)
-                annotated_sources.append(source)
-            return text, annotated_sources, attempted
-        logger.info("No usable grounded evidence for claim %s on search pass %d",
-                    claim_index, len(attempted))
-    return "", [], attempted
-
-_VALID_STANCES = {"SUPPORTS", "CONTRADICTS", "PARTIAL", "IRRELEVANT", "INSUFFICIENT"}
-_VALID_DIRECTNESS = {"DIRECT", "INDIRECT"}
-
-# Confidence ceilings below are deliberately simple, named constants (not a weighted
-# formula) - each one is a cap, not a deduction, and callers combine them with min().
-_CONFIDENCE_CAP_NO_DIRECT_SOURCE = 75
-_CONFIDENCE_CAP_SINGLE_SUPPORT = 85
-_CONFIDENCE_CAP_UNRESOLVED_CONTRADICTION = 70
-_CONFIDENCE_CAP_SNIPPETS_ONLY = 85
-
-_DUPLICATE_CONTENT_THRESHOLD = 0.85
-
-
-def _validate_source_analysis(entries, source_count: int) -> list[dict]:
-    # Drops malformed entries rather than failing the whole claim or spending a retry -
-    # a partially-malformed source_analysis is still useful signal, and retrying costs
-    # a real Gemini call for something usually recoverable.
-    valid = []
-    if not isinstance(entries, list):
-        return valid
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        index = entry.get("source_index")
-        if not isinstance(index, int) or not (0 <= index < source_count):
-            continue
-        stance = str(entry.get("stance", "")).upper()
-        if stance not in _VALID_STANCES:
-            continue
-        directness = str(entry.get("directness", "")).upper()
-        if directness not in _VALID_DIRECTNESS:
-            directness = "INDIRECT"  # safe default rather than dropping an otherwise-valid entry
-        excerpt = entry.get("evidence_excerpt")
-        valid.append({
-            "source_index": index,
-            "stance": stance,
-            "directness": directness,
-            "reason": str(entry.get("reason", ""))[:300],
-            "evidence_excerpt": excerpt if isinstance(excerpt, str) and excerpt.strip() else None,
-        })
-    return valid
-
-
-def _aggregate_stance(source_analysis: list[dict]) -> tuple[bool, bool]:
-    # This is what makes source_analysis authoritative rather than decorative: supported/
-    # contradicted are derived from the validated per-source stances, not trusted from the
-    # model's own top-level fields - the same "recompute, don't trust" pattern already used
-    # one level up for the final TRUE/FALSE/UNVERIFIABLE verdict.
-    supported = any(entry["stance"] == "SUPPORTS" for entry in source_analysis)
-    contradicted = any(entry["stance"] == "CONTRADICTS" for entry in source_analysis)
-    return supported, contradicted
-
-
-def _verify_evidence_excerpt(excerpt: str | None, source_content: str) -> bool:
-    # Soft hallucination signal, not proof: a false result means the excerpt doesn't
-    # appear verbatim (after whitespace normalization) in what was actually retrieved -
-    # models often paraphrase even when asked to quote, so this is a warning input,
-    # never grounds to discard a stance outright.
-    if not excerpt or not source_content:
-        return False
-    normalize = lambda s: re.sub(r"\s+", " ", s).strip().lower()
-    return normalize(excerpt) in normalize(source_content)
-
-
-def _one_based_source_references(explanation, source_count: int) -> str:
-    """Convert the model's zero-based evidence citations for display."""
-    text = explanation if isinstance(explanation, str) else ""
-
-    def replace(match: re.Match) -> str:
-        index = int(match.group(1))
-        return f"[{index + 1}]" if index < source_count else match.group(0)
-
-    return re.sub(r"\[(\d+)\]", replace, text)
-
-
-def _detect_supported_language(text, *, minimum_score: int = 3) -> str | None:
-    """Identify clear English/Indonesian prose without adding a runtime dependency."""
-    if not isinstance(text, str):
-        return None
-    words = re.findall(r"[^\W\d_]+", text.lower(), flags=re.UNICODE)
-    scores = {
-        language: sum(word in markers for word in words)
-        for language, markers in _LANGUAGE_MARKERS.items()
-    }
-    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
-    (language, score), (_, runner_up) = ranked
-    if score < minimum_score or score - runner_up < 2:
-        return None
-    return language
-
-
-def _source_reference_list(indices: list[int], language: str) -> str:
-    references = [f"[{index}]" for index in indices]
-    if len(references) < 2:
-        return references[0] if references else ""
-    conjunction = " dan " if language == "Indonesian" else " and "
-    return ", ".join(references[:-1]) + conjunction + references[-1]
-
-
-def _language_safe_explanation(verdict: str, source_analysis: list[dict],
-                               language: str) -> str:
-    """Produce a truthful fallback when model prose uses the wrong language."""
-    if verdict == "TRUE":
-        indices = [
-            entry["source_index"] for entry in source_analysis
-            if entry["stance"] == "SUPPORTS"
-        ]
-        references = _source_reference_list(indices, language)
-        if language == "Indonesian":
-            location = f" dalam sumber {references}" if references else ""
-            return f"Bukti yang diterima{location} secara langsung mendukung klaim ini."
-        location = f" in source {references}" if references else ""
-        return f"The accepted evidence{location} directly supports this claim."
-
-    if verdict == "FALSE":
-        indices = [
-            entry["source_index"] for entry in source_analysis
-            if entry["stance"] == "CONTRADICTS"
-        ]
-        references = _source_reference_list(indices, language)
-        if language == "Indonesian":
-            location = f" dalam sumber {references}" if references else ""
-            return f"Bukti yang diterima{location} secara langsung membantah klaim ini."
-        location = f" in source {references}" if references else ""
-        return f"The accepted evidence{location} directly contradicts this claim."
-
-    partial_indices = [
-        entry["source_index"] for entry in source_analysis
-        if entry["stance"] == "PARTIAL"
-    ]
-    references = _source_reference_list(partial_indices, language)
-    if language == "Indonesian":
-        if references:
-            return (f"Sumber {references} hanya membahas sebagian klaim, sehingga keseluruhan "
-                    "klaim tidak dapat diverifikasi.")
-        return ("Sumber yang tersedia tidak secara langsung membuktikan atau membantah "
-                "keseluruhan klaim ini.")
-    if references:
-        return (f"Source {references} addresses only part of the claim, so the full claim "
-                "cannot be verified.")
-    return ("The available sources do not directly establish or contradict the full claim, "
-            "so it remains unverifiable.")
-
-
-def _no_evidence_verdict(claim: dict, claim_index: int,
-                         document_language: str | None = None,
-                         search_queries: list[str] | None = None) -> dict:
-    """Represent an evidence miss explicitly instead of leaving a blank claim slot."""
-    language = _detect_supported_language(claim.get("claim")) or document_language or "English"
-    if language == "Indonesian":
-        explanation = ("Tidak ditemukan bukti yang cukup relevan, sehingga klaim ini tidak "
-                       "dapat diverifikasi.")
-    else:
-        explanation = ("No sufficiently relevant evidence was retrieved, so this claim cannot "
-                       "be verified.")
-    result = {
-        "claim": claim["claim"],
-        "speaker": claim.get("speaker", "UNKNOWN"),
-        "claim_index": claim_index,
-        "supported": False,
-        "contradicted": False,
-        "verdict": "UNVERIFIABLE",
-        "confidence": 60,
-        "explanation": explanation,
-        "evidence_status": "insufficient_after_search",
-        "search_attempts": len(search_queries or []),
-        "search_queries": list(search_queries or []),
-        "source_analysis": [],
-        "sources": [],
-    }
-    for field in ("merged_from", "original_claims"):
-        if field in claim:
-            result[field] = copy.deepcopy(claim[field])
-    return result
-
-
-def _group_duplicate_sources(sources: list[dict]) -> list[int]:
-    # Returns, per source, the index of the first source in its near-duplicate group
-    # (itself, if it's first) - groups syndicated/wire-service copies so they don't
-    # each count as independent confirmation, without hiding either URL from the
-    # user-facing source list. Pure stdlib (difflib), no new dependency.
-    group_of = list(range(len(sources)))
-    for i in range(len(sources)):
-        for j in range(i):
-            if group_of[j] != j:
-                continue  # only compare against each group's representative
-            similarity = difflib.SequenceMatcher(
-                None, sources[i].get("content", ""), sources[j].get("content", "")
-            ).ratio()
-            if similarity >= _DUPLICATE_CONTENT_THRESHOLD:
-                group_of[i] = j
-                break
-    return group_of
-
-
-def _cap_confidence(confidence: int, *, independent_supports: int, has_contradiction: bool,
-                     any_direct: bool, all_snippets: bool) -> int:
-    # Ceilings, not deductions: each condition caps the model's own number rather than
-    # discarding the result. A single weak signal shouldn't fail a claim outright. Silent
-    # by design - no user-facing explanation string is produced; regular users found the
-    # warning text more confusing than useful, so only the calibrated number is kept.
-    cap = 100
-    if not any_direct:
-        cap = min(cap, _CONFIDENCE_CAP_NO_DIRECT_SOURCE)
-    if independent_supports <= 1:
-        cap = min(cap, _CONFIDENCE_CAP_SINGLE_SUPPORT)
-    if has_contradiction:
-        cap = min(cap, _CONFIDENCE_CAP_UNRESOLVED_CONTRADICTION)
-    if all_snippets:
-        cap = min(cap, _CONFIDENCE_CAP_SNIPPETS_ONLY)
-    return min(int(confidence), cap)
-
-
-def _calculate_confidence(
-    source_analysis: list[dict],
-    sources: list[dict],
-    *,
-    supported: bool,
-    contradicted: bool,
-) -> tuple[int, dict]:
-    """Return a repeatable evidence-strength score and the factors behind it.
-
-    This is deliberately an evidence-quality indicator, not a probability that the
-    claim is true. The model's self-reported number is ignored.
-    """
-    duplicate_group = _group_duplicate_sources(sources)
-    decisive_stance = "SUPPORTS" if supported and not contradicted else (
-        "CONTRADICTS" if contradicted and not supported else None
+    return _retrieval.search_claim(
+        claim,
+        deadline,
+        provider_context,
+        claim_index,
+        cancel_event,
+        search_func=_search,
     )
-    decisive = [
-        entry for entry in source_analysis
-        if decisive_stance and entry["stance"] == decisive_stance
-    ]
-    independent_sources = len({
-        duplicate_group[entry["source_index"]] for entry in decisive
-    })
-    any_direct = any(entry["directness"] == "DIRECT" for entry in decisive)
-    valid_excerpt = any(entry.get("evidence_excerpt_valid") for entry in decisive)
-    all_snippets = bool(sources) and all(not source.get("is_full_content") for source in sources)
-    quality_tiers = [
-        int(sources[entry["source_index"]].get("quality_tier") or
-            _source_quality(_source_domain(sources[entry["source_index"]]))[0])
-        for entry in decisive
-    ]
-    best_quality_tier = min(quality_tiers, default=None)
-
-    if decisive_stance:
-        score = 62
-        score += {1: 14, 2: 10, 3: 5}.get(best_quality_tier, 0)
-        score += 8 if any_direct else 0
-        score += 10 if independent_sources >= 3 else (7 if independent_sources >= 2 else 0)
-        score += 4 if valid_excerpt else 0
-        score -= 5 if all_snippets else 0
-        score = _cap_confidence(
-            score,
-            independent_supports=independent_sources,
-            has_contradiction=supported and contradicted,
-            any_direct=any_direct,
-            all_snippets=all_snippets,
-        )
-        score = max(60, min(95, score))
-    else:
-        # Confidence here means confidence that available evidence is insufficient or
-        # conflicting, not confidence that the underlying claim is false.
-        analyzed_groups = len({
-            duplicate_group[entry["source_index"]] for entry in source_analysis
-        })
-        score = min(75, 60 + (8 if supported and contradicted else 0)
-                    + (4 if analyzed_groups >= 2 else 0))
-
-    return score, {
-        "meaning": "evidence_strength_not_truth_probability",
-        "model_score_used": False,
-        "decisive_stance": decisive_stance,
-        "independent_decisive_sources": independent_sources,
-        "best_quality_tier": best_quality_tier,
-        "has_direct_evidence": any_direct,
-        "has_validated_excerpt": valid_excerpt,
-        "snippets_only": all_snippets,
-        "conflicting_decisive_evidence": supported and contradicted,
-    }
-
 
 def _verify_one(claim: dict, search_text: str, sources: list[dict],
-                 deadline: float | None = None,
-                 document_language: str | None = None,
-                 provider_context: ProviderContext | None = None,
-                 claim_index: int | None = None,
-                 cancel_event=None) -> dict | None:
-    # One verify call per claim: keeps each verdict paired with its own search results (no positional zip drift) and lets callers reveal results as they land.
-    if not search_text:
-        # No search evidence at all (search failed or returned zero usable sources). Do not
-        # send an empty evidence block to the model - verified live that it will still answer
-        # confidently from its own training knowledge and fabricate source URLs that were
-        # never actually retrieved. Raise instead of guessing; the caller's existing per-claim
-        # error handling drops this claim from the results rather than showing a fake verdict.
-        raise NoEvidenceError(f"no search evidence for claim: {claim['claim'][:60]!r}")
-
-    required_language = (
-        _detect_supported_language(claim["claim"]) or document_language
-    )
-    language_instruction = (
-        f"REQUIRED OUTPUT LANGUAGE: {required_language}. Write all generated prose in "
-        f"{required_language}, even if the sources use another language.\n"
-        if required_language else
-        "REQUIRED OUTPUT LANGUAGE: exactly match the language of the CLAIM, not the sources.\n"
-    )
-    context = (f"SPEAKER: {claim.get('speaker', 'UNKNOWN')}\n"
-               f"CLAIM: {claim['claim']}\n"
-               f"SEARCH RESULTS:\n{search_text}\n\n"
-               f"{language_instruction}")
-    raw_reply = _chat(
-        VERIFY_PROMPT,
-        context,
-        max_tokens=1000,
-        deadline=deadline,
-        response_format=VERIFY_RESPONSE_FORMAT,
-        provider_context=provider_context,
-        stage="verification",
-        claim_index=claim_index,
-        cancel_event=cancel_event,
-    )
-    raw_items, protocol_valid = _parse_provider_array(raw_reply)
-    if not protocol_valid:
-        logger.error(
-            "Verification protocol returned no JSON array or object."
-        )
-        raise ProviderProtocolError("verification response was not a JSON array")
-
-    parsed = []
-    for v in raw_items:
-        if isinstance(v, dict) and "supported" in v and "contradicted" in v:
-            parsed.append(v)
-
-    if not parsed:
-        if raw_items:
-            logger.error(
-                "Verification protocol parsed %d object(s), but none had "
-                "supported/contradicted.",
-                len(raw_items),
-            )
-            raise ProviderProtocolError("verification response omitted required fields")
-        return None
-    verdict = parsed[0]
-
-    # source_analysis is what makes supported/contradicted authoritative rather than
-    # decorative: aggregated per-source stances become these two fields, not whatever
-    # the model returned at the top level directly - otherwise the model could report
-    # supported=true while its own source_analysis says every source CONTRADICTS or is
-    # IRRELEVANT, and nothing would catch it.
-    source_analysis = _validate_source_analysis(verdict.get("source_analysis"), len(sources))
-    if not source_analysis:
-        logger.error("Verification response had no valid source_analysis entries.")
-        raise ProviderProtocolError("verification response omitted valid source analysis")
-    supported, contradicted = _aggregate_stance(source_analysis)
-
-    for entry in source_analysis:
-        source = sources[entry["source_index"]]
-        entry["evidence_excerpt_valid"] = _verify_evidence_excerpt(
-            entry["evidence_excerpt"], source.get("content", "")
-        )
-
-    confidence, confidence_factors = _calculate_confidence(
-        source_analysis,
+                deadline: float | None = None,
+                document_language: str | None = None,
+                provider_context: ProviderContext | None = None,
+                claim_index: int | None = None,
+                cancel_event=None) -> dict | None:
+    return _verification.verify_one(
+        claim,
+        search_text,
         sources,
-        supported=supported,
-        contradicted=contradicted,
+        deadline,
+        document_language,
+        provider_context,
+        claim_index,
+        cancel_event,
+        chat_func=_chat,
+        parse_provider_array=_parse_provider_array,
     )
-
-    verdict["supported"] = supported
-    verdict["contradicted"] = contradicted
-    verdict["source_analysis"] = source_analysis
-    # extension/state.js::normalizeSource already falls back title -> name -> domain ->
-    # "Source N" for object-shaped sources - including domain here means a source with
-    # no grounding-supplied title shows its domain instead of a generic placeholder.
-    public_source_fields = (
-        "url", "canonical_url", "provider_url", "title", "domain", "source_type",
-        "quality_tier", "canonical_resolution", "search_query", "search_attempt",
-    )
-    verdict["sources"] = [
-        {field: s.get(field) for field in public_source_fields if s.get(field) is not None}
-        for s in sources
-    ]
-    verdict["confidence"] = confidence
-    verdict["confidence_factors"] = confidence_factors
-    # No user-facing "warning" text - removed deliberately, see _cap_confidence's
-    # comment. Pop defensively in case the model ever spontaneously includes one
-    # (VERIFY_PROMPT never asks for it, so this should be a no-op in practice).
-    verdict.pop("warning", None)
-
-    # Deterministic verdict: derived from supported/contradicted (themselves now derived
-    # from source_analysis, not trusted from the model directly) rather than trusting the
-    # model's own "verdict" field - closes the "no evidence found -> FALSE" failure mode
-    # at the code level instead of just asking the model not to do it.
-    model_verdict = str(verdict.get("verdict", "")).upper()
-    if supported and not contradicted:
-        verdict["verdict"] = "TRUE"
-    elif contradicted and not supported:
-        verdict["verdict"] = "FALSE"
-    else:
-        verdict["verdict"] = "UNVERIFIABLE"
-    verdict["evidence_status"] = (
-        "sufficient"
-        if verdict["verdict"] in {"TRUE", "FALSE"}
-        else ("conflicting" if supported and contradicted else "insufficient_or_partial")
-    )
-
-    # The model's explanation was written to justify model_verdict, not necessarily the recomputed one. If we overrode it, say so, otherwise the label and explanation can
-    # read as contradicting each other (e.g. "[TRUE] Why: no direct evidence found").
-    if model_verdict and model_verdict != verdict["verdict"]:
-        verdict["explanation"] = (verdict.get("explanation", "").rstrip() +
-            f" (Verdict corrected to {verdict['verdict']} from the evidence fields.)")
-
-    explanation = verdict.get("explanation")
-    explanation_language = _detect_supported_language(explanation, minimum_score=2)
-    if (required_language and
-            (not isinstance(explanation, str) or not explanation.strip()
-             or (explanation_language and explanation_language != required_language))):
-        verdict["explanation"] = _language_safe_explanation(
-            verdict["verdict"], source_analysis, required_language
-        )
-
-    verdict["explanation"] = _one_based_source_references(
-        verdict.get("explanation"), len(sources)
-    )
-
-    return verdict
 
 def fact_check(transcript: str, on_result=None, *, on_progress=None,
                on_claims=None, on_evidence=None, cancel_event=None,
@@ -1462,6 +354,12 @@ def fact_check(transcript: str, on_result=None, *, on_progress=None,
     if deadline is None:
         deadline = time.monotonic() + WHOLE_JOB_DEADLINE_SECONDS
     deadline_reported = False
+    extraction_stats = {
+        "provider_claim_count": 0,
+        "split_count": None,
+        "deduplication_merge_count": 0,
+        "final_claim_count": 0,
+    }
 
     def progress(stage: str, **details) -> None:
         _safe_callback(on_progress, {"stage": stage, **details}, "Progress")
@@ -1486,6 +384,7 @@ def fact_check(transcript: str, on_result=None, *, on_progress=None,
             claim_count=claim_count,
             errors=errors,
             usage=providers.usage.snapshot(),
+            extraction_stats=copy.deepcopy(extraction_stats),
         )
         progress("complete", status=status, claim_count=claim_count,
                  completed_count=len(result))
@@ -1532,10 +431,17 @@ def fact_check(transcript: str, on_result=None, *, on_progress=None,
         errors.append(_public_provider_error("extraction", exc))
         return finish("failed")
 
-    claims = _deduplicate_claims([
+    valid_claims = [
         claim for claim in raw_claims
         if isinstance(claim, dict) and claim.get("claim") and claim.get("query")
-    ])[:MAX_CLAIMS]
+    ]
+    extraction_stats["provider_claim_count"] = len(valid_claims)
+    deduplicated_claims = _deduplicate_claims(valid_claims)
+    extraction_stats["deduplication_merge_count"] = (
+        len(valid_claims) - len(deduplicated_claims)
+    )
+    claims = deduplicated_claims[:MAX_CLAIMS]
+    extraction_stats["final_claim_count"] = len(claims)
     if raw_claims and not claims:
         exc = ProviderProtocolError("extraction response omitted required fields")
         errors.append(_public_provider_error("extraction", exc))
